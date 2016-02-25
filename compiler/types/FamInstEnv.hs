@@ -58,7 +58,6 @@ import Var
 import Pair
 import SrcLoc
 import FastString
-import MonadUtils
 import Control.Monad
 import Data.Function ( on )
 import Data.List( mapAccumL )
@@ -1227,32 +1226,27 @@ topNormaliseType_maybe env ty
 normaliseTcApp :: FamInstEnvs -> Role -> TyCon -> [Type] -> (Coercion, Type)
 -- See comments on normaliseType for the arguments of this function
 normaliseTcApp env role tc tys
-  = initNormM env role (tyCoVarsOfTypes tys) $
+  = extractNormalisedType $
+    initNormM env role (tyCoVarsOfTypes tys) $
     normalise_tc_app tc tys
 
--- See Note [Normalising types] about the LiftingContext
-normalise_tc_app :: TyCon -> [Type] -> NormM (Coercion, Type)
+-- See Note [Normalising types]
+normalise_tc_app :: TyCon -> [Type] -> NormM Coercion
 normalise_tc_app tc tys
-  = do { (args_co, ntys) <- normalise_tc_args tc tys
-       ; case expandSynTyCon_maybe tc ntys of
-         { Just (tenv, rhs, ntys') ->
-           do { (co2, ninst_rhs)
-                  <- normalise_type (substTy (mkTvSubstPrs tenv) rhs)
-              ; return $
-                if isReflCo co2
-                then (args_co,                 mkTyConApp tc ntys)
-                else (args_co `mkTransCo` co2, mkAppTys ninst_rhs ntys') }
-         ; Nothing ->
-    do { env <- getEnv
+  | Just (tenv, rhs, leftover_tys) <- expandSynTyCon_maybe tc tys
+  = normalise_type (substTy (mkTvSubstPrs tenv) rhs `mkAppTys` leftover_tys)
+  | otherwise
+  = do { args_cos <- normalise_tc_args tc tys
+       ; env <- getEnv
        ; role <- getRole
-       ; case reduceTyFamApp_maybe env role tc ntys of
+       ; let args_co = mkTyConAppCo role tc args_cos
+       ; case reduceTyFamApp_maybe env role tc (map (pSnd . coercionKind) args_cos) of
            Just (first_co, ty')
-             -> do { (rest_co,nty) <- normalise_type ty'
-                   ; return ( args_co `mkTransCo` first_co `mkTransCo` rest_co
-                            , nty ) }
+             -> do { rest_co <- normalise_type ty'
+                   ; return (args_co `mkTransCo` first_co `mkTransCo` rest_co) }
            _ -> -- No unique matching family instance exists;
                 -- we do not do anything
-                return (args_co, mkTyConApp tc ntys) }}}
+                return args_co }
 
 ---------------
 -- | Normalise arguments to a tycon
@@ -1262,17 +1256,16 @@ normaliseTcArgs :: FamInstEnvs          -- ^ env't with family instances
                 -> [Type]               -- ^ tys
                 -> (Coercion, [Type])   -- ^ co :: tc tys ~ tc new_tys
 normaliseTcArgs env role tc tys
-  = initNormM env role (tyCoVarsOfTypes tys) $
-    normalise_tc_args tc tys
+  = let cos = initNormM env role (tyCoVarsOfTypes tys) $
+              normalise_tc_args tc tys
+    in
+    (mkTyConAppCo role tc cos, map (pSnd . coercionKind) cos)
 
 normalise_tc_args :: TyCon -> [Type]             -- tc tys
-                  -> NormM (Coercion, [Type])    -- (co, new_tys), where
-                                                 -- co :: tc tys ~ tc new_tys
+                  -> NormM [Coercion]            -- cos :: tys ~ new_tys
 normalise_tc_args tc tys
   = do { role <- getRole
-       ; (cois, ntys) <- zipWithAndUnzipM normalise_type_role
-                                          tys (tyConRolesX role tc)
-       ; return (mkTyConAppCo role tc cois, ntys) }
+       ; zipWithM normalise_type_role tys (tyConRolesX role tc) }
   where
     normalise_type_role ty r = withRole r $ normalise_type ty
 
@@ -1281,11 +1274,11 @@ normaliseType :: FamInstEnvs
               -> Role  -- desired role of coercion
               -> Type -> (Coercion, Type)
 normaliseType env role ty
-  = initNormM env role (tyCoVarsOfType ty) $ normalise_type ty
+  = extractNormalisedType $
+    initNormM env role (tyCoVarsOfType ty) $ normalise_type ty
 
-normalise_type :: Type                     -- old type
-               -> NormM (Coercion, Type)   -- (coercion,new type), where
-                                         -- co :: old-type ~ new_type
+normalise_type :: Type             -- old type
+               -> NormM Coercion   -- co :: old-type ~ new_type
 -- Normalise the input type, by eliminating *all* type-function redexes
 -- but *not* newtypes (which are visible to the programmer)
 -- Returns with Refl if nothing happens
@@ -1299,47 +1292,45 @@ normalise_type
   where
     go (TyConApp tc tys) = normalise_tc_app tc tys
     go ty@(LitTy {})     = do { r <- getRole
-                              ; return (mkReflCo r ty, ty) }
+                              ; return (mkReflCo r ty) }
     go (AppTy ty1 ty2)
-      = do { (co,  nty1) <- go ty1
-           ; (arg, nty2) <- withRole Nominal $ go ty2
-           ; return (mkAppCo co arg, mkAppTy nty1 nty2) }
+      = do { co  <- go ty1
+           ; arg <- withRole Nominal $ go ty2
+           ; return (mkAppCo co arg) }
     go (ForAllTy (Anon ty1) ty2)
-      = do { (co1, nty1) <- go ty1
-           ; (co2, nty2) <- go ty2
+      = do { co1 <- go ty1
+           ; co2 <- go ty2
            ; r <- getRole
-           ; return (mkFunCo r co1 co2, mkFunTy nty1 nty2) }
+           ; return (mkFunCo r co1 co2) }
     go (ForAllTy (Named tyvar vis) ty)
-      = do { (lc', tv', h, ki') <- normalise_tyvar_bndr tyvar
-           ; (co, nty)          <- withLC lc' $ normalise_type ty
-           ; let tv2 = setTyVarKind tv' ki'
-           ; return (mkForAllCo tv' h co, mkNamedForAllTy tv2 vis nty) }
+      = do { (lc', tv', h) <- normalise_tyvar_bndr tyvar
+           ; co            <- withLC lc' $ normalise_type ty
+           ; return (mkForAllCo tv' vis h co) }
     go (TyVarTy tv)    = normalise_tyvar tv
     go (CastTy ty co)
-      = do { (nco, nty) <- go ty
-           ; lc <- getLC
-           ; let co' = substRightCo lc co
-           ; return (castCoercionKind nco co co', mkCastTy nty co') }
+      = do { nco <- go ty
+           ; lc  <- getLC
+           ; let co' = substCo (lcSubstRight lc) co
+           ; return (castCoercionKind nco co co') }
     go (CoercionTy co)
       = do { lc <- getLC
            ; r <- getRole
-           ; let right_co = substRightCo lc co
+           ; let right_co = substCo (lcSubstRight lc) co
            ; return ( mkProofIrrelCo r
                          (liftCoSubst Nominal lc (coercionType co))
-                         co right_co
-                    , mkCoercionTy right_co ) }
+                         co right_co ) }
 
-normalise_tyvar :: TyVar -> NormM (Coercion, Type)
+normalise_tyvar :: TyVar -> NormM Coercion
 normalise_tyvar tv
   = ASSERT( isTyVar tv )
     do { lc <- getLC
        ; r  <- getRole
        ; return $ case liftCoSubstTyVar lc r tv of
-           Just co -> (co, pSnd $ coercionKind co)
-           Nothing -> (mkReflCo r ty, ty) }
+           Just co -> co
+           Nothing -> mkReflCo r ty }
   where ty = mkTyVarTy tv
 
-normalise_tyvar_bndr :: TyVar -> NormM (LiftingContext, TyVar, Coercion, Kind)
+normalise_tyvar_bndr :: TyVar -> NormM (LiftingContext, TyVar, Coercion)
 normalise_tyvar_bndr tv
   = do { lc1 <- getLC
        ; env <- getEnv
@@ -1385,6 +1376,9 @@ instance Functor NormM where
 instance Applicative NormM where
   pure x = NormM $ \ _ _ _ -> x
   (<*>)  = ap
+
+extractNormalisedType :: Coercion -> (Coercion, Type)
+extractNormalisedType co = (co, pSnd $ coercionKind co)
 
 {-
 ************************************************************************
@@ -1565,29 +1559,31 @@ allTyVarsInTy = go
     go (CastTy ty co)    = go ty `unionVarSet` go_co co
     go (CoercionTy co)   = go_co co
 
-    go_co (Refl _ ty)           = go ty
-    go_co (TyConAppCo _ _ args) = go_cos args
-    go_co (AppCo co arg)        = go_co co `unionVarSet` go_co arg
-    go_co (ForAllCo tv h co)
-      = unionVarSets [unitVarSet tv, go_co co, go_co h]
-    go_co (CoVarCo cv)          = unitVarSet cv
-    go_co (AxiomInstCo _ _ cos) = go_cos cos
-    go_co (UnivCo p _ t1 t2)    = go_prov p `unionVarSet` go t1 `unionVarSet` go t2
-    go_co (SymCo co)            = go_co co
-    go_co (TransCo c1 c2)       = go_co c1 `unionVarSet` go_co c2
-    go_co (NthCo _ co)          = go_co co
-    go_co (LRCo _ co)           = go_co co
-    go_co (InstCo co arg)       = go_co co `unionVarSet` go_co arg
-    go_co (CoherenceCo c1 c2)   = go_co c1 `unionVarSet` go_co c2
-    go_co (KindCo co)           = go_co co
-    go_co (SubCo co)            = go_co co
-    go_co (AxiomRuleCo _ cs)    = go_cos cs
+    go_co (CachedCoercion { coercionRep = rep }) = go_rep rep
 
-    go_cos = foldr (unionVarSet . go_co) emptyVarSet
+    go_rep (Refl _ ty)           = go ty
+    go_rep (TyConAppCo _ _ args) = go_reps args
+    go_rep (AppCo co arg)        = go_rep co `unionVarSet` go_rep arg
+    go_rep (ForAllCo tv _ h co)
+      = unionVarSets [unitVarSet tv, go_rep co, go_co h]
+    go_rep (CoVarCo cv)          = unitVarSet cv
+    go_rep (AxiomInstCo _ _ cos) = go_reps cos
+    go_rep (UnivCo p _ t1 t2)    = go_prov p `unionVarSet` go t1 `unionVarSet` go t2
+    go_rep (SymCo co)            = go_rep co
+    go_rep (TransCo c1 c2)       = go_rep c1 `unionVarSet` go_rep c2
+    go_rep (NthCo _ co)          = go_rep co
+    go_rep (LRCo _ co)           = go_rep co
+    go_rep (InstCo co arg)       = go_rep co `unionVarSet` go_rep arg
+    go_rep (CoherenceCo c1 c2)   = go_rep c1 `unionVarSet` go_co c2
+    go_rep (KindCo co)           = go_rep co
+    go_rep (SubCo _ co)          = go_rep co
+    go_rep (AxiomRuleCo _ cs)    = go_reps cs
+
+    go_reps = foldr (unionVarSet . go_rep) emptyVarSet
 
     go_prov UnsafeCoerceProv    = emptyVarSet
-    go_prov (PhantomProv co)    = go_co co
-    go_prov (ProofIrrelProv co) = go_co co
+    go_prov (PhantomProv co)    = go_rep co
+    go_prov (ProofIrrelProv co) = go_rep co
     go_prov (PluginProv _)      = emptyVarSet
     go_prov (HoleProv _)        = emptyVarSet
 

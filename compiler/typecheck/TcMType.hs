@@ -47,7 +47,6 @@ module TcMType (
 
   newCoercionHole, fillCoercionHole, isFilledCoercionHole,
   unpackCoercionHole, unpackCoercionHole_maybe,
-  checkCoercionHole,
 
   --------------------------------
   -- Instantiation
@@ -236,7 +235,7 @@ fillCoercionHole (CoercionHole u ref) co
          pprPanic "Filling a filled coercion hole" (ppr u $$ ppr co $$ ppr old_co)
 #endif
        ; traceTc "Filling coercion hole" (ppr u <+> text ":=" <+> ppr co)
-       ; writeTcRef ref (Just co) }
+       ; writeTcRef ref (Just (coercionRep co)) }
 
 -- | Is a coercion hole filled in?
 isFilledCoercionHole :: CoercionHole -> TcM Bool
@@ -244,7 +243,7 @@ isFilledCoercionHole (CoercionHole _ ref) = isJust <$> readTcRef ref
 
 -- | Retrieve the contents of a coercion hole. Panics if the hole
 -- is unfilled
-unpackCoercionHole :: CoercionHole -> TcM Coercion
+unpackCoercionHole :: CoercionHole -> TcM CoercionRep
 unpackCoercionHole hole
   = do { contents <- unpackCoercionHole_maybe hole
        ; case contents of
@@ -252,30 +251,8 @@ unpackCoercionHole hole
            Nothing -> pprPanic "Unfilled coercion hole" (ppr hole) }
 
 -- | Retrieve the contents of a coercion hole, if it is filled
-unpackCoercionHole_maybe :: CoercionHole -> TcM (Maybe Coercion)
+unpackCoercionHole_maybe :: CoercionHole -> TcM (Maybe CoercionRep)
 unpackCoercionHole_maybe (CoercionHole _ ref) = readTcRef ref
-
--- | Check that a coercion is appropriate for filling a hole. (The hole
--- itself is needed only for printing. NB: This must be /lazy/ in the coercion,
--- as it's used in TcHsSyn in the presence of knots.
--- Always returns the checked coercion, but this return value is necessary
--- so that the input coercion is forced only when the output is forced.
-checkCoercionHole :: Coercion -> CoercionHole -> Role -> Type -> Type -> TcM Coercion
-checkCoercionHole co h r t1 t2
--- co is already zonked, but t1 and t2 might not be
-  | debugIsOn
-  = do { t1 <- zonkTcType t1
-       ; t2 <- zonkTcType t2
-       ; let (Pair _t1 _t2, _role) = coercionKindRole co
-       ; return $
-         ASSERT2( t1 `eqType` _t1 && t2 `eqType` _t2 && r == _role
-                , (text "Bad coercion hole" <+>
-                   ppr h <> colon <+> vcat [ ppr _t1, ppr _t2, ppr _role
-                                           , ppr co, ppr t1, ppr t2
-                                           , ppr r ]) )
-         co }
-  | otherwise
-  = return co
 
 {-
 ************************************************************************
@@ -1276,20 +1253,19 @@ zonkTcTypeMapper :: TyCoMapper () TcM
 zonkTcTypeMapper = TyCoMapper
   { tcm_smart = True
   , tcm_tyvar = const zonkTcTyVar
-  , tcm_covar = const (\cv -> mkCoVarCo <$> zonkTyCoVarKind cv)
+  , tcm_covar = \ _env cv -> zonkTyCoVarKind cv
   , tcm_hole  = hole
   , tcm_tybinder = \_env tv _vis -> ((), ) <$> zonkTcTyCoVarBndr tv }
   where
     hole :: () -> CoercionHole -> Role -> Type -> Type
-         -> TcM Coercion
+         -> TcM CoercionRep
     hole _ h r t1 t2
       = do { contents <- unpackCoercionHole_maybe h
            ; case contents of
-               Just co -> do { co <- zonkCo co
-                             ; checkCoercionHole co h r t1 t2 }
+               Just co -> zonkCoRep co
                Nothing -> do { t1 <- zonkTcType t1
                              ; t2 <- zonkTcType t2
-                             ; return $ mkHoleCo h r t1 t2 } }
+                             ; return $ mkHoleCoRep h r t1 t2 } }
 
 
 -- For unbound, mutable tyvars, zonkType uses the function given to it
@@ -1301,6 +1277,10 @@ zonkTcType = mapType zonkTcTypeMapper ()
 -- | "Zonk" a coercion -- really, just zonk any types in the coercion
 zonkCo :: Coercion -> TcM Coercion
 zonkCo = mapCoercion zonkTcTypeMapper ()
+
+-- | "Zonk" a CoercionRep -- really, just zonk any types in it
+zonkCoRep :: CoercionRep -> TcM CoercionRep
+zonkCoRep = mapCoercionRep zonkTcTypeMapper ()
 
 zonkTcTyCoVarBndr :: TcTyCoVar -> TcM TcTyCoVar
 -- A tyvar binder is never a unification variable (MetaTv),

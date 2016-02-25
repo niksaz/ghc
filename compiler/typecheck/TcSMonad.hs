@@ -3117,9 +3117,9 @@ deferTcSForAllEq role loc kind_cos (bndrs1,body1) (bndrs2,body2)
                                , ic_binds  = Nothing -- no place to put binds
                                , ic_env    = env
                                , ic_info   = skol_info }
+            cobndrs   = zip3 skol_tvs (map binderVisibility bndrs1) kind_cos
       ; updWorkListTcS (extendWorkListImplic imp)
-      ; let cobndrs    = zip skol_tvs kind_cos
-      ; return $ mkForAllCos cobndrs hole_co }
+      ; return $ mkTcForAllCos cobndrs hole_co }
    where
      tvs1 = map (binderVar "deferTcSForAllEq") bndrs1
      tvs2 = map (binderVar "deferTcSForAllEq") bndrs2
