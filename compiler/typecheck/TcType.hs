@@ -849,22 +849,18 @@ isTouchableOrFmv ctxt_tclvl tv
 
 isTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isTouchableMetaTyVar ctxt_tclvl tv
-  | isTyVar tv
   = case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl }
         -> ASSERT2( checkTcLevelInvariant ctxt_tclvl tv_tclvl,
                     ppr tv $$ ppr tv_tclvl $$ ppr ctxt_tclvl )
            tv_tclvl `sameDepthAs` ctxt_tclvl
       _ -> False
-  | otherwise = False
 
 isFloatedTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isFloatedTouchableMetaTyVar ctxt_tclvl tv
-  | isTyVar tv
   = case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl } -> tv_tclvl `strictlyDeeperThan` ctxt_tclvl
       _ -> False
-  | otherwise = False
 
 isImmutableTyVar :: TyVar -> Bool
 isImmutableTyVar tv
@@ -879,11 +875,9 @@ isTyConableTyVar tv
         -- True of a meta-type variable that can be filled in
         -- with a type constructor application; in particular,
         -- not a SigTv
-  | isTyVar tv
   = case tcTyVarDetails tv of
         MetaTv { mtv_info = SigTv } -> False
         _                           -> True
-  | otherwise = True
 
 isFmvTyVar tv
   = case tcTyVarDetails tv of
@@ -909,18 +903,14 @@ isSkolemTyVar tv
         _other    -> True
 
 isOverlappableTyVar tv
-  | isTyVar tv
   = case tcTyVarDetails tv of
         SkolemTv overlappable -> overlappable
         _                     -> False
-  | otherwise = False
 
 isMetaTyVar tv
-  | isTyVar tv
   = case tcTyVarDetails tv of
         MetaTv {} -> True
         _         -> False
-  | otherwise = False
 
 -- isAmbiguousTyVar is used only when reporting type errors
 -- It picks out variables that are unbound, namely meta
@@ -928,12 +918,10 @@ isMetaTyVar tv
 -- RtClosureInspect.zonkRTTIType.  These are "ambiguous" in
 -- the sense that they stand for an as-yet-unknown type
 isAmbiguousTyVar tv
-  | isTyVar tv
   = case tcTyVarDetails tv of
         MetaTv {}     -> True
         RuntimeUnk {} -> True
         _             -> False
-  | otherwise = False
 
 isMetaTyVarTy :: TcType -> Bool
 isMetaTyVarTy (TyVarTy tv) = isMetaTyVar tv
