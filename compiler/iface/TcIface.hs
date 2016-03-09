@@ -52,7 +52,6 @@ import Literal
 import qualified Var
 import VarEnv
 import VarSet
-import FV
 import Name
 import NameEnv
 import NameSet
@@ -946,34 +945,37 @@ tcIfaceTyLit (IfaceStrTyLit n) = return (StrTyLit n)
 -}
 
 tcIfaceCo :: IfaceCoercion -> IfL Coercion
-tcIfaceCo = go
+tcIfaceCo (IfaceCachedCoercion ty1 ty2 role rep)
+  = do { ty1' <- tcIfaceType ty1
+       ; ty2' <- tcIfaceType ty2
+       ; rep' <- go rep
+       ; return (mkCoercion rep' role ty1' ty2') }
   where
-    go (IfaceReflCo r t)         = mkReflCo r <$> tcIfaceType t
-    go (IfaceFunCo r c1 c2)      = mkFunCo r <$> go c1 <*> go c2
+    go (IfaceReflCo r t)         = Refl r <$> tcIfaceType t
+    go (IfaceFunCo r c1 c2)      = TyConAppCo r funTyCon <$> mapM go [c1, c2]
     go (IfaceTyConAppCo r tc cs)
-      = mkTyConAppCo r <$> tcIfaceTyCon tc <*> mapM go cs
-    go (IfaceAppCo c1 c2)        = mkAppCo <$> go c1 <*> go c2
-    go (IfaceForAllCo tv v k c)  = do { k' <- go k
+      = TyConAppCo r <$> tcIfaceTyCon tc <*> mapM go cs
+    go (IfaceAppCo c1 c2)        = AppCo <$> go c1 <*> go c2
+    go (IfaceForAllCo tv v k c)  = do { k' <- tcIfaceCo k
                                       ; bindIfaceTyVar tv $ \ tv' ->
-                                        mkForAllCo tv' v k' <$> go c }
-    go (IfaceCoVarCo n)          = mkCoVarCo <$> go_var n
-    go (IfaceAxiomInstCo n i cs) = mkAxiomInstCo <$> tcIfaceCoAxiom n <*> pure i <*> mapM go cs
+                                        ForAllCo tv' v k' <$> go c }
+    go (IfaceCoVarCo n)          = CoVarCo <$> go_var n
+    go (IfaceAxiomInstCo n i cs) = AxiomInstCo <$> tcIfaceCoAxiom n <*> pure i <*> mapM go cs
     go (IfaceUnivCo p r t1 t2)
-      = do { (p', fvs) <- tcIfaceUnivCoProv p
-           ; mkUnivCo p' fvs r <$> tcIfaceType t1 <*> tcIfaceType t2 }
-    go (IfaceSymCo c)            = mkSymCo    <$> go c
-    go (IfaceTransCo c1 c2)      = mkTransCo  <$> go c1
-                                              <*> go c2
-    go (IfaceInstCo c1 t2)       = mkInstCo   <$> go c1
-                                              <*> go t2
-    go (IfaceNthCo d c)          = mkNthCo d  <$> go c
-    go (IfaceLRCo lr c)          = mkLRCo lr  <$> go c
-    go (IfaceCoherenceCo c1 c2)  = mkCoherenceCo <$> go c1
-                                                 <*> go c2
-    go (IfaceKindCo c)           = mkKindCo   <$> go c
-    go (IfaceSubCo r c)          = mkSubRoleCo r <$> go c
-    go (IfaceAxiomRuleCo ax cos) = mkAxiomRuleCo <$> go_axiom_rule ax
-                                                 <*> mapM go cos
+      = UnivCo <$> go_prov p <*> pure r <*> tcIfaceType t1 <*> tcIfaceType t2
+    go (IfaceSymCo c)            = SymCo    <$> go c
+    go (IfaceTransCo c1 c2)      = TransCo  <$> go c1
+                                            <*> go c2
+    go (IfaceInstCo c1 t2)       = InstCo   <$> go c1
+                                            <*> go t2
+    go (IfaceNthCo d c)          = NthCo d  <$> go c
+    go (IfaceLRCo lr c)          = LRCo lr  <$> go c
+    go (IfaceCoherenceCo c1 c2)  = CoherenceCo <$> go c1
+                                               <*> tcIfaceCo c2
+    go (IfaceKindCo c)           = KindCo   <$> go c
+    go (IfaceSubCo r c)          = SubCo r  <$> go c
+    go (IfaceAxiomRuleCo ax cos) = AxiomRuleCo <$> go_axiom_rule ax
+                                               <*> mapM go cos
 
     go_var :: FastString -> IfL CoVar
     go_var = tcIfaceLclId
@@ -984,15 +986,11 @@ tcIfaceCo = go
         Just ax -> return ax
         _  -> pprPanic "go_axiom_rule" (ppr n)
 
-tcIfaceUnivCoProv :: IfaceUnivCoProv -> IfL (UnivCoProvenance, FV)
-tcIfaceUnivCoProv IfaceUnsafeCoerceProv     = return (UnsafeCoerceProv, noVars)
-tcIfaceUnivCoProv (IfacePhantomProv kco)
-  = do { kco' <- tcIfaceCo kco
-       ; return (PhantomProv (coercionRep kco'), tyCoVarsOfCoAcc kco') }
-tcIfaceUnivCoProv (IfaceProofIrrelProv kco)
-  = do { kco' <- tcIfaceCo kco
-       ; return (ProofIrrelProv (coercionRep kco'), tyCoVarsOfCoAcc kco') }
-tcIfaceUnivCoProv (IfacePluginProv str)     = return (PluginProv str, noVars)
+    go_prov :: IfaceUnivCoProv -> IfL UnivCoProvenance
+    go_prov IfaceUnsafeCoerceProv     = return UnsafeCoerceProv
+    go_prov (IfacePhantomProv kco)    = PhantomProv <$> go kco
+    go_prov (IfaceProofIrrelProv kco) = ProofIrrelProv <$> go kco
+    go_prov (IfacePluginProv str)     = return (PluginProv str)
 
 {-
 ************************************************************************

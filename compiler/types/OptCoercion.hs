@@ -88,7 +88,7 @@ optCoercion env co
   | opt_NoOptCoercion = substCo env co
   | debugIsOn
   = let (Pair in_ty1  in_ty2,  in_role)  = coercionKindRole co
-        (Pair out_ty1 out_ty2, out_role) = coercionKindRole out_co
+        (Pair out_ty1 out_ty2, out_role) = coercionRepKindRole out_rep
     in
     ASSERT2( substTyUnchecked env in_ty1 `eqType` out_ty1 &&
              substTyUnchecked env in_ty2 `eqType` out_ty2 &&
@@ -106,11 +106,11 @@ optCoercion env co
   | otherwise         = out_co
   where
     lc = mkSubstLiftingContext env
-    out_co = CachedCoercion { coercionKind    = substTy env <$> coercionKind co
-                            , coercionRole    = coercionRole co
-                            , tyCoVarsOfCoAcc = tyCoVarsOfCoRepAcc out_rep
-                            , coercionInfo    = NoCachedInfo
-                            , coercionRep     = out_rep }
+    out_co = CachedCoercion { coercionKind   = substTy env <$> coercionKind co
+                            , coercionRole   = coercionRole co
+                            , coercionRepFVs = tyCoVarsOfCoRepAcc out_rep
+                            , coercionInfo   = NoCachedInfo
+                            , coercionRep    = out_rep }
     out_rep = opt_co2 lc False (coercionRole co) (coercionRep co)
 
 type NormalCoRep    = CoercionRep
@@ -180,11 +180,11 @@ opt_co4_wrap_co env sym repr role (CachedCoercion { coercionKind = kind
                                                   , coercionRole = role1
                                                   , coercionRep  = rep })
   = ASSERT( role == role1 )
-    CachedCoercion { coercionKind    = substTy <$> lcSubst env <*> kind
-                   , coercionRole    = role
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoRepAcc rep'
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = rep' }
+    CachedCoercion { coercionKind   = substTy <$> lcSubst env <*> kind
+                   , coercionRole   = role
+                   , coercionRepFVs = tyCoVarsOfCoRepAcc rep'
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = rep' }
   where
     rep' = opt_co4_wrap env sym repr role rep
 
@@ -389,8 +389,7 @@ opt_univ env sym prov role oty1 oty2
       -- NB: prov isn't interesting here either
   = let k1   = tyVarKind tv1
         k2   = tyVarKind tv2
-        fvs  = tyCoVarsOfProvAcc prov `unionFV` mapUnionFV tyCoVarsOfTypeAcc [k1, k2]
-        eta  = mkUnivCo prov fvs Nominal k1 k2
+        eta  = mkUnivCo prov Nominal k1 k2
           -- eta gets opt'ed soon, but not yet.
         ty2' = substTyWith [tv2] [TyVarTy tv1 `mkCastTy` eta] ty2
 
@@ -436,7 +435,7 @@ opt_nth_co env sym rep r = go []
       = Just (Refl (nthRole r1 tc n) (args `getNth` n))
       | n == 0
       , Just (tv, _) <- splitForAllTy_maybe ty
-      = Just (mkReflCoRep Nominal (tyVarKind tv))
+      = Just (Refl Nominal (tyVarKind tv))
     push_nth n (TyConAppCo _ _ cos)
       = Just (cos `getNth` n)
     push_nth 0 (ForAllCo _ _ eta _)
@@ -477,12 +476,12 @@ opt_transList is = zipWith (opt_trans is)
 
 opt_trans_co :: InScopeSet -> NormalCo -> NormalCo -> NormalCo
 opt_trans_co is co1 co2
-  = CachedCoercion { coercionKind    = Pair ty1 ty3
-                   , coercionRole    = coercionRole co1
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc [co1, co2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = opt_trans is (coercionRep co1)
-                                                    (coercionRep co2) }
+  = CachedCoercion { coercionKind   = Pair ty1 ty3
+                   , coercionRole   = coercionRole co1
+                   , coercionRepFVs = mapUnionFV coercionRepFVs [co1, co2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = opt_trans is (coercionRep co1)
+                                                   (coercionRep co2) }
   where
     Pair ty1 _ = coercionKind co1
     Pair _ ty3 = coercionKind co2
@@ -571,13 +570,13 @@ opt_trans_rule is in_co1@(AppCo co1a co1b) in_co2@(AppCo co2a co2b)
 
 -- Eta rules
 opt_trans_rule is co1@(TyConAppCo r tc cos1) co2
-  | Just cos2 <- etaTyConAppCo_maybe tc co2
+  | Just cos2 <- etaTyConAppCo_maybe r tc co2
   = ASSERT( length cos1 == length cos2 )
     fireTransRule "EtaCompL" co1 co2 $
     mkTyConAppCoRep r tc (opt_transList is cos1 cos2)
 
 opt_trans_rule is co1 co2@(TyConAppCo r tc cos2)
-  | Just cos1 <- etaTyConAppCo_maybe tc co1
+  | Just cos1 <- etaTyConAppCo_maybe r tc co1
   = ASSERT( length cos1 == length cos2 )
     fireTransRule "EtaCompR" co1 co2 $
     mkTyConAppCoRep r tc (opt_transList is cos1 cos2)
@@ -886,7 +885,7 @@ etaForAllCo_maybe co
   , let kind_co    = mkNthCo 0 (mkCachedCoercion co)
   = Just ( tv1, kind_co
          , mkInstCoRep co $
-           mkReflCoRep Nominal (TyVarTy tv1) `mkCoherenceRightCoRep` kind_co )
+           Refl Nominal (TyVarTy tv1) `mkCoherenceRightCoRep` kind_co )
 
   | otherwise
   = Nothing
@@ -908,15 +907,17 @@ etaAppCo_maybe co
   | otherwise
   = Nothing
 
-etaTyConAppCo_maybe :: TyCon -> CoercionRep -> Maybe [CoercionRep]
+etaTyConAppCo_maybe :: Role  -- of the CoercionRep
+                    -> TyCon -> CoercionRep -> Maybe [CoercionRep]
 -- If possible, split a coercion
 --       g :: T s1 .. sn ~ T t1 .. tn
 -- into [ Nth 0 g :: s1~t1, ..., Nth (n-1) g :: sn~tn ]
-etaTyConAppCo_maybe tc (TyConAppCo _ tc2 cos2)
+etaTyConAppCo_maybe _ tc (TyConAppCo _ tc2 cos2)
   = ASSERT( tc == tc2 ) Just cos2
 
-etaTyConAppCo_maybe tc co
+etaTyConAppCo_maybe r tc co
   | mightBeUnsaturatedTyCon tc
+  , isInjectiveTyCon tc r
   , Pair ty1 ty2     <- coercionRepKind co
   , Just (tc1, tys1) <- splitTyConApp_maybe ty1
   , Just (tc2, tys2) <- splitTyConApp_maybe ty2
@@ -1052,7 +1053,7 @@ liftCoMatch tmpls ty co
        ; return (LC (mkEmptyTCvSubst in_scope) cenv2) }
   where
     menv     = ME { me_tmpls = tmpls, me_env = mkRnEnv2 in_scope }
-    in_scope = mkInScopeSet (tmpls `unionVarSet` runFVSet (tyCoVarsOfCoRepAcc co))
+    in_scope = mkInScopeSet (tmpls `unionVarSet` tyCoVarsOfCoRep co)
     -- Like tcMatchTy, assume all the interesting variables
     -- in ty are in tmpls
 
@@ -1105,7 +1106,7 @@ ty_co_match menv subst (TyVarTy tv1) co lkco rkco
     else Nothing       -- no match since tv1 matches two different coercions
 
   | tv1' `elemVarSet` me_tmpls menv           -- tv1' is a template var
-  = if any (inRnEnvR rn_env) (runFVList $ tyCoVarsOfCoRepAcc co)
+  = if any (inRnEnvR rn_env) (tyCoVarsOfCoRepList co)
     then Nothing      -- occurs check failed
     else Just $ extendVarEnv subst tv1' $
                 castCoercionKind (mkCachedCoercion co) (mkSymCo lkco) (mkSymCo rkco)
@@ -1195,7 +1196,7 @@ pushRefl (Refl r (ForAllTy (Anon ty1) ty2))
 pushRefl (Refl r (TyConApp tc tys))
   = Just (TyConAppCo r tc (zipWith Refl (tyConRolesX r tc) tys))
 pushRefl (Refl r (ForAllTy (Named tv _) ty))
-  = Just (coercionRep $ mkHomoForAllCos_NoRefl [tv] (mkReflCo r ty))
+  = Just (coercionRep $ mkHomoForAllCos_NoRefl [tv] (mkReflCo_NoSyns r ty))
     -- NB: NoRefl variant. Otherwise, we get a loop!
 pushRefl (Refl r (CastTy ty co))  = Just (castCoercionKindRep (Refl r ty) co co)
 pushRefl _                        = Nothing
@@ -1208,7 +1209,7 @@ promoteCoercion :: CoercionRep -> CoercionRepN
 promoteCoercion = go
   where
     go corep = case corep of
-      Refl _ ty -> mkReflCoRep Nominal (typeKind ty)
+      Refl _ ty -> Refl Nominal (typeKind ty)
 
       TyConAppCo _ tc args
         -> instCoercions (tyConBinders tc) (tyConResKind tc) args

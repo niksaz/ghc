@@ -583,7 +583,7 @@ can_eq_nc' flat _rdr_env _envs ev eq_rel ty1 ps_ty1 (CastTy ty2 co2) _
 -- Literals
 can_eq_nc' _flat _rdr_env _envs ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
  | l1 == l2
-  = do { setEqIfWanted ev (mkReflCo (eqRelRole eq_rel) ty1)
+  = do { setEqIfWanted ev (mkReflCo_NoSyns (eqRelRole eq_rel) ty1)
        ; stopWith ev "Equal LitTy" }
 
 -- Try to decompose type constructor applications
@@ -1119,7 +1119,9 @@ canDecomposableTyConAppOK ev eq_rel tc tys1 tys2
               ; setWantedEq dest (mkTyConAppCo role tc cos) }
 
      CtGiven { ctev_evar = evar }
-        -> do { let ev_co = mkCoVarCo evar
+        -> do { ev_co <- zonkCo $ mkCoVarCo evar
+                  -- need to zonk here, because the mkNthCo needs to see that
+                  -- evar's types are indeed TyConApps.
               ; given_evs <- newGivenEvVars loc $
                              [ ( mkPrimEqPredRole r ty1 ty2
                                , EvCoercion (mkNthCo i ev_co) )
@@ -1916,7 +1918,7 @@ unifyWanted loc role orig_ty1 orig_ty2
                 Nothing   -> bale_out }
 
     go ty1@(CoercionTy {}) (CoercionTy {})
-      = return (mkReflCo role ty1) -- we just don't care about coercions!
+      = return (mkReflCo_NoSyns role ty1) -- we just don't care about coercions!
 
     go _ _ = bale_out
 

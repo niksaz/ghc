@@ -162,7 +162,8 @@ module Type (
         isEmptyTCvSubst, unionTCvSubst,
 
         -- ** Performing substitution on types and kinds
-        substTy, substTys, substTyWith, substTysWith, substTheta,
+        substTy, substTys, substTyWith, substTysWith, substTyWithAddInScope,
+        substTheta,
         substTyAddInScope,
         substTyUnchecked, substTysUnchecked, substThetaUnchecked,
         substTyWithBindersUnchecked, substTyWithUnchecked,
@@ -334,7 +335,9 @@ expandTypeSynonyms ty
   where
     go subst (TyConApp tc tys)
       | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc tys
-      = let subst' = unionTCvSubst subst (mkTvSubstPrs tenv) in
+      = let tenv'  = map (second (go subst)) tenv
+              -- make sure range of tenv has no synonyms
+            subst' = unionTCvSubst subst (mkTvSubstPrs tenv') in
         go subst' (mkAppTys rhs tys')
       | otherwise
       = TyConApp tc (map (go subst) tys)
@@ -346,8 +349,15 @@ expandTypeSynonyms ty
     go subst (ForAllTy (Named tv vis) t)
       = let (subst', tv') = substTyVarBndrCallback go subst tv in
         ForAllTy (Named tv' vis) (go subst' t)
-    go subst (CastTy ty co)  = mkCastTy (go subst ty) (substCo subst co)
-    go subst (CoercionTy co) = mkCoercionTy (substCo subst co)
+    go subst (CastTy ty co)  = mkCastTy (go subst ty) (go_co subst co)
+    go subst (CoercionTy co) = mkCoercionTy (go_co subst co)
+
+    go_co subst co@(CachedCoercion { coercionKind   = kind
+                                   , coercionRepFVs = fvs
+                                   , coercionRep    = rep })
+      = co { coercionKind   = go subst <$> kind
+           , coercionRepFVs = substCoFVs (getTCvSubstFVEnv subst) fvs
+           , coercionRep    = substCoRep subst rep }
 
 {-
 ************************************************************************
@@ -436,11 +446,11 @@ mapCoercion mapper orig_env (CachedCoercion { coercionKind = co_kind
                                             , coercionRep  = rep })
   = do { rep' <- mapCoercionRep mapper orig_env rep
        ; co_kind' <- traverse (mapType mapper orig_env) co_kind
-       ; return $ CachedCoercion { coercionKind    = co_kind'
-                                 , coercionRole    = role
-                                 , tyCoVarsOfCoAcc = tyCoVarsOfCoRepAcc rep'
-                                 , coercionInfo    = NoCachedInfo
-                                 , coercionRep     = rep' } }
+       ; return $ CachedCoercion { coercionKind   = co_kind'
+                                 , coercionRole   = role
+                                 , coercionRepFVs = tyCoVarsOfCoRepAcc rep'
+                                 , coercionInfo   = NoCachedInfo
+                                 , coercionRep    = rep' } }
 
 {-# INLINABLE mapCoercionRep #-}  -- See Note [Specialising mappers]
 mapCoercionRep :: Monad m

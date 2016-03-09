@@ -51,7 +51,8 @@ module TyCoRep (
         -- Functions over coercions
         pickLR,
 
-        mkReflCoRep, isReflCoRep_maybe, mkTyConAppCoRep, mkAppCoRep,
+        mkReflCoRep, mkReflCoRep_NoSyns,
+        isReflCoRep_maybe, mkTyConAppCoRep, mkAppCoRep,
         mkForAllCoRep, mkAxiomInstCoRep, mkUnivCoRep, mkCoVarCoRep,
         mkSymCoRep, mkTransCoRep,
         mkNthCoRep, mkLRCoRep,
@@ -78,8 +79,10 @@ module TyCoRep (
         coVarsOfCo, coVarsOfCos,
         tyCoVarsOfCo, tyCoVarsOfCos,
         tyCoVarsOfCoDSet,
+        tyCoVarsOfCoAcc,
         tyCoVarsOfCosAcc,
         tyCoVarsOfCoRepAcc, tyCoVarsOfProvAcc,
+        tyCoVarsOfCoRep, tyCoVarsOfCoReps, tyCoVarsOfCoRepList,
         tyCoVarsOfCoList,
         closeOverKinds,
         tyCoVarsOfTelescope,
@@ -103,8 +106,9 @@ module TyCoRep (
         zipTyBinderSubst,
         mkTvSubstPrs,
 
-        substTyWith, substTyWithCoVars, substTysWith, substTysWithCoVars,
-        substCoWith,
+        substTyWith, substTyWithAddInScope,
+        substTyWithCoVars, substTysWith, substTysWithCoVars,
+        substCoWith, substCoFVs, getTCvSubstFVEnv,
         substTy, substTyAddInScope,
         substTyUnchecked, substTysUnchecked, substThetaUnchecked,
         substTyWithBindersUnchecked, substTyWithUnchecked,
@@ -635,19 +639,44 @@ dropRuntimeRepArgs = dropWhile isRuntimeRepKindedTy
             Coercions
 %*                                                                      *
 %************************************************************************
+
+Note [Type synonyms in coercions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We would like to set things up so that the body of a coercion never has to
+be inspected unless we're running lint. At first blush, it looks like all
+we have to do is cache the kind, role, and free variables of a coercion up
+top. But there's an annoying complication with phantom type synonyms, like
+
+  data Annoying a = Int
+
+If we allow coercions to have type synonyms in them, then we'll have to unwrap
+Annoying to discover that `a` isn't really free. But we really don't want to
+walk through the coercion to do this. So we brutally require that CoercionReps
+do //not// have type synonyms in them.
+
+However, it would be inconvenient to users if the *types* of coercions can
+never have type synonyms. So we don't force unwrapping in coercionKind. This
+means that the free variables in coercionKind might mention phantom variables
+even though the CoercionRep itself does not. Hence, we need to look at
+coercionKind when finding the free variables of a Coercion, not just the
+cached coercionRepFVs.
+
+We're careful to expand in the coercionKind in occurCheckExpand and
+expandTypeSynonyms, without disturbing the CoercionRep.
+
 -}
 
 -- | A 'Coercion' is concrete evidence of the equality/convertibility
--- of two types.
+-- of two types. See Note [Free vars of a coercion]
 data Coercion
-  = CachedCoercion { coercionKind    :: Pair Type
-                   , coercionRole    :: Role
-                   , tyCoVarsOfCoAcc :: FV
-                   , coercionInfo    :: CachedCoInfo
+  = CachedCoercion { coercionKind   :: Pair Type
+                   , coercionRole   :: Role
+                   , coercionRepFVs :: FV
+                   , coercionInfo   :: CachedCoInfo
                         -- ^ sometimes we need a bit of extra info to
                         -- to optimize computation of coercionKind.
                         -- It goes here.
-                   , coercionRep     :: CoercionRep }
+                   , coercionRep    :: CoercionRep }
   deriving (Data.Typeable)
 -- We never inspect the contents of a coercion outside of OptCoercion, so
 -- let's cache all the interesting bits right up front.
@@ -669,7 +698,7 @@ mkCachedCoercion ki r fvs info rep
 
 con_CachedCoercion :: Data.Constr
 con_CachedCoercion = Data.mkConstr ty_Coercion "CachedCoercion"
-                       [ "coercionKind", "coercionRole", "tyCoVarsOfCoAcc"
+                       [ "coercionKind", "coercionRole", "coercionRepFVs"
                        , "coercionInfo", "coercionRep" ] Data.Prefix
 
 ty_Coercion :: Data.DataType
@@ -694,6 +723,7 @@ data CoercionRep
           -- For example  (Refl T) (Refl a) (Refl b) shows up as (Refl (T a b)).
 
           -- Invariant: The Type contains no type synonyms
+          -- See Note [Type synonyms in coercions]
 
           -- Applications of (Refl T) to some coercions, at least one of
           -- which is NOT the identity, show up as TyConAppCo.
@@ -1316,6 +1346,9 @@ These maintain the invariants described above.
 mkReflCoRep :: Role -> Type -> CoercionRep
 mkReflCoRep r ty = Refl r (expandTypeSynonyms ty)
 
+mkReflCoRep_NoSyns :: Role -> Type -> CoercionRep
+mkReflCoRep_NoSyns = Refl
+
 isReflCoRep_maybe :: CoercionRep -> Maybe (Type, Role)
 isReflCoRep_maybe (Refl r ty) = Just (ty, r)
 isReflCoRep_maybe _           = Nothing
@@ -1343,7 +1376,7 @@ mkAppCoRep (Refl r ty1) co2
   = TyConAppCo r tc (zip_roles (tyConRolesX r tc) tys)
   where
     zip_roles (r1:_)  []            = [downgradeRoleRep r1 Nominal co2]
-    zip_roles (r1:rs) (ty1:tys)     = mkReflCoRep r1 ty1 : zip_roles rs tys
+    zip_roles (r1:rs) (ty1:tys)     = Refl r1 ty1 : zip_roles rs tys
     zip_roles _       _             = panic "zip_roles" -- but the roles are infinite...
 
 mkAppCoRep (TyConAppCo r tc args) arg
@@ -1378,7 +1411,7 @@ mkUnivCoRep p r t1 t2
   = UnivCo p r (expandTypeSynonyms t1) (expandTypeSynonyms t2)
 
 mkCoVarCoRep :: CoVar -> CoercionRep
-mkCoVarCoRep = CoVarCo
+mkCoVarCoRep cv = CoVarCo (updateVarType expandTypeSynonyms cv)
 
 mkSymCoRep :: CoercionRep -> CoercionRep
 -- Do a few simple optimizations, but don't bother pushing occurrences
@@ -1395,10 +1428,10 @@ mkTransCoRep co1 co2       = TransCo co1 co2
 mkNthCoRep :: Int -> CoercionRep -> CoercionRep
 mkNthCoRep 0 (Refl _ ty)
   | Just (tv, _) <- splitForAllTy_maybe ty
-  = mkReflCoRep Nominal (tyVarKind tv)
+  = Refl Nominal (tyVarKind tv)
 mkNthCoRep n (Refl r ty)
   = ASSERT( ok_tc_app ty n )
-    mkReflCoRep r' (tyConAppArgN n ty)
+    Refl r' (tyConAppArgN n ty)
   where tc = tyConAppTyCon ty
         r' = nthRole r tc n
 
@@ -1438,7 +1471,7 @@ castCoercionKindRep co h1 h2
   = (mkSymCoRep (mkSymCoRep co `mkCoherenceCoRep` h2)) `mkCoherenceCoRep` h1
 
 mkKindCoRep :: CoercionRep -> CoercionRepN
-mkKindCoRep (Refl _ ty)                       = mkReflCoRep Nominal (typeKind ty)
+mkKindCoRep (Refl _ ty)                       = Refl Nominal (typeKind ty)
 mkKindCoRep (UnivCo (PhantomProv h) _ _ _)    = h
 mkKindCoRep (UnivCo (ProofIrrelProv h) _ _ _) = h
 mkKindCoRep co                                = KindCo co
@@ -1604,6 +1637,12 @@ tyCoVarsOfCoList co = runFVList $ tyCoVarsOfCoAcc co
 tyCoVarsOfCos :: [Coercion] -> TyCoVarSet
 tyCoVarsOfCos cos = runFVSet $ tyCoVarsOfCosAcc cos
 
+tyCoVarsOfCoAcc :: Coercion -> FV
+tyCoVarsOfCoAcc (CachedCoercion { coercionKind   = Pair ty1 ty2
+                                , coercionRepFVs = fv })
+  fv_cand in_scope acc
+  = (fv `unionFV` tyCoVarsOfTypesAcc [ty1, ty2]) fv_cand in_scope acc
+
 tyCoVarsOfCosAcc :: [Coercion] -> FV
 tyCoVarsOfCosAcc []       fv_cand in_scope acc = noVars fv_cand in_scope acc
 tyCoVarsOfCosAcc (co:cos) fv_cand in_scope acc = (tyCoVarsOfCoAcc co `unionFV` tyCoVarsOfCosAcc cos) fv_cand in_scope acc
@@ -1639,6 +1678,15 @@ tyCoVarsOfCoRepAcc co a b c = go co a b c
 tyCoVarsOfCoRepsAcc :: [CoercionRep] -> FV
 tyCoVarsOfCoRepsAcc []       fv_cand in_scope acc = noVars fv_cand in_scope acc
 tyCoVarsOfCoRepsAcc (co:cos) fv_cand in_scope acc = (tyCoVarsOfCoRepAcc co `unionFV` tyCoVarsOfCoRepsAcc cos) fv_cand in_scope acc
+
+tyCoVarsOfCoRep :: CoercionRep -> VarSet
+tyCoVarsOfCoRep = runFVSet . tyCoVarsOfCoRepAcc
+
+tyCoVarsOfCoRepList :: CoercionRep -> [Var]
+tyCoVarsOfCoRepList = runFVList . tyCoVarsOfCoRepAcc
+
+tyCoVarsOfCoReps :: [CoercionRep] -> VarSet
+tyCoVarsOfCoReps = runFVSet . tyCoVarsOfCoRepsAcc
 
 tyCoVarsOfProvAcc :: UnivCoProvenance -> FV
 tyCoVarsOfProvAcc UnsafeCoerceProv    fv_cand in_scope acc = noVars fv_cand in_scope acc
@@ -2240,6 +2288,13 @@ substTyAddInScope :: TCvSubst -> Type -> Type
 substTyAddInScope subst ty =
   substTy (extendTCvInScopeSet subst $ tyCoVarsOfType ty) ty
 
+-- | Substitute in a 'Type', building an appropriate 'InScopeSet' to obey
+-- Note [The substitution invariant]. Use this variant when you don't have
+-- the free variables of the type-to-substitute to hand.
+substTyWithAddInScope :: [TyVar] -> [Type] -> Type -> Type
+substTyWithAddInScope tvs tys = ASSERT( length tvs == length tys)
+                                substTyAddInScope (zipTvSubst tvs tys)
+
 -- | When calling `substTy` it should be the case that the in-scope set in
 -- the substitution is a superset of the free vars of the range of the
 -- substitution.
@@ -2283,7 +2338,7 @@ checkValidSubst subst@(TCvSubst in_scope tenv cenv) tys cos coreps a
   where
   substDomain = varEnvKeys tenv ++ varEnvKeys cenv
   needInScope = (tyCoVarsOfTypes tys `unionVarSet` tyCoVarsOfCos cos
-                                     `unionVarSet` (runFVSet $ tyCoVarsOfCoRepsAcc coreps))
+                                     `unionVarSet` tyCoVarsOfCoReps coreps)
                   `delListFromUFM_Directly` substDomain
   tysCosFVsInScope = needInScope `varSetInScope` in_scope
 
@@ -2456,27 +2511,39 @@ substCos subst cos
   | isEmptyTCvSubst subst = cos
   | otherwise = checkValidSubst subst [] cos [] $ map (subst_co subst) cos
 
-subst_co :: TCvSubst -> Coercion -> Coercion
-subst_co subst@(TCvSubst _ tv_env cv_env)
-         (CachedCoercion { coercionKind    = co_kind
-                         , coercionRole    = role
-                         , tyCoVarsOfCoAcc = co_fv
-                         , coercionRep     = rep })
-  = CachedCoercion { coercionKind    = fmap (subst_ty subst) co_kind
-                   , coercionRole    = role
-                   , tyCoVarsOfCoAcc = new_fv
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = subst_co_rep subst rep }
+-- | Given a mapping from variables to FVs, update an FV. This is used
+-- with coercionRepFVs, hence the name of the function.
+substCoFVs :: VarEnv FV -> FV -> FV
+substCoFVs env fv a b c
+  = mapUnionFV subst_and_fv (runFVList fv) a b c
   where
-    new_fv a b c = mapUnionFV subst_and_fv (runFVList co_fv) a b c
-
     subst_and_fv v a b c
-      | Just ty <- lookupVarEnv tv_env v
-      = tyCoVarsOfTypeAcc ty a b c
-      | Just co <- lookupVarEnv cv_env v
-      = tyCoVarsOfCoAcc co a b c
+      | Just fvs' <- lookupVarEnv env v
+      = fvs' a b c
       | otherwise
       = oneVar v a b c
+
+-- | Used with 'substCoFVs' when you have a 'TCvSubst' to hand
+getTCvSubstFVEnv :: TCvSubst -> VarEnv FV
+getTCvSubstFVEnv (TCvSubst _ tv_env cv_env)
+  = mapVarEnv tyCoVarsOfTypeAcc tv_env `plusVarEnv`
+    mapVarEnv coercionRepFVs    cv_env
+                                 -- in subst_co_rep, we call coercionRep, so
+                                 -- we want only the rep FVs here
+
+subst_co :: TCvSubst -> Coercion -> Coercion
+subst_co subst
+         (CachedCoercion { coercionKind   = co_kind
+                         , coercionRole   = role
+                         , coercionRepFVs = co_fv
+                         , coercionRep    = rep })
+  = CachedCoercion { coercionKind   = fmap (subst_ty subst) co_kind
+                   , coercionRole   = role
+                   , coercionRepFVs = new_fv
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = subst_co_rep subst rep }
+  where
+    new_fv a b c = substCoFVs (getTCvSubstFVEnv subst) co_fv a b c
 
 subst_co_rep :: TCvSubst -> CoercionRep -> CoercionRep
 subst_co_rep subst = go
@@ -3319,15 +3386,15 @@ tidyKind = tidyType
 
 ----------------
 tidyCo :: TidyEnv -> Coercion -> Coercion
-tidyCo env@(_, subst) (CachedCoercion { coercionKind    = co_kind
-                                      , coercionRole    = role
-                                      , tyCoVarsOfCoAcc = fv
-                                      , coercionRep     = rep })
-  = CachedCoercion { coercionKind    = fmap (tidyType env) co_kind
-                   , coercionRole    = role
-                   , tyCoVarsOfCoAcc = new_fv
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = tidy_corep env rep }
+tidyCo env@(_, subst) (CachedCoercion { coercionKind   = co_kind
+                                      , coercionRole   = role
+                                      , coercionRepFVs = fv
+                                      , coercionRep    = rep })
+  = CachedCoercion { coercionKind   = fmap (tidyType env) co_kind
+                   , coercionRole   = role
+                   , coercionRepFVs = new_fv
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = tidy_corep env rep }
   where
     new_fv a b c = tidyFV subst fv a b c
 

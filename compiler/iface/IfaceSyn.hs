@@ -1257,45 +1257,49 @@ freeNamesIfType (IfaceCastTy t c)     = freeNamesIfType t &&& freeNamesIfCoercio
 freeNamesIfType (IfaceCoercionTy c)   = freeNamesIfCoercion c
 
 freeNamesIfCoercion :: IfaceCoercion -> NameSet
-freeNamesIfCoercion (IfaceReflCo _ t) = freeNamesIfType t
-freeNamesIfCoercion (IfaceFunCo _ c1 c2)
-  = freeNamesIfCoercion c1 &&& freeNamesIfCoercion c2
-freeNamesIfCoercion (IfaceTyConAppCo _ tc cos)
-  = freeNamesIfTc tc &&& fnList freeNamesIfCoercion cos
-freeNamesIfCoercion (IfaceAppCo c1 c2)
-  = freeNamesIfCoercion c1 &&& freeNamesIfCoercion c2
-freeNamesIfCoercion (IfaceForAllCo _ _ kind_co co)
-  = freeNamesIfCoercion kind_co &&& freeNamesIfCoercion co
-freeNamesIfCoercion (IfaceCoVarCo _)
+freeNamesIfCoercion (IfaceCachedCoercion t1 t2 _ rep)
+  = freeNamesIfType t1 &&& freeNamesIfType t2 &&& freeNamesIfCoercionRep rep
+
+freeNamesIfCoercionRep :: IfaceCoercionRep -> NameSet
+freeNamesIfCoercionRep (IfaceReflCo _ t) = freeNamesIfType t
+freeNamesIfCoercionRep (IfaceFunCo _ c1 c2)
+  = freeNamesIfCoercionRep c1 &&& freeNamesIfCoercionRep c2
+freeNamesIfCoercionRep (IfaceTyConAppCo _ tc cos)
+  = freeNamesIfTc tc &&& fnList freeNamesIfCoercionRep cos
+freeNamesIfCoercionRep (IfaceAppCo c1 c2)
+  = freeNamesIfCoercionRep c1 &&& freeNamesIfCoercionRep c2
+freeNamesIfCoercionRep (IfaceForAllCo _ _ kind_co co)
+  = freeNamesIfCoercion kind_co &&& freeNamesIfCoercionRep co
+freeNamesIfCoercionRep (IfaceCoVarCo _)
   = emptyNameSet
-freeNamesIfCoercion (IfaceAxiomInstCo ax _ cos)
-  = unitNameSet ax &&& fnList freeNamesIfCoercion cos
-freeNamesIfCoercion (IfaceUnivCo p _ t1 t2)
+freeNamesIfCoercionRep (IfaceAxiomInstCo ax _ cos)
+  = unitNameSet ax &&& fnList freeNamesIfCoercionRep cos
+freeNamesIfCoercionRep (IfaceUnivCo p _ t1 t2)
   = freeNamesIfProv p &&& freeNamesIfType t1 &&& freeNamesIfType t2
-freeNamesIfCoercion (IfaceSymCo c)
-  = freeNamesIfCoercion c
-freeNamesIfCoercion (IfaceTransCo c1 c2)
-  = freeNamesIfCoercion c1 &&& freeNamesIfCoercion c2
-freeNamesIfCoercion (IfaceNthCo _ co)
-  = freeNamesIfCoercion co
-freeNamesIfCoercion (IfaceLRCo _ co)
-  = freeNamesIfCoercion co
-freeNamesIfCoercion (IfaceInstCo co co2)
-  = freeNamesIfCoercion co &&& freeNamesIfCoercion co2
-freeNamesIfCoercion (IfaceCoherenceCo c1 c2)
-  = freeNamesIfCoercion c1 &&& freeNamesIfCoercion c2
-freeNamesIfCoercion (IfaceKindCo c)
-  = freeNamesIfCoercion c
-freeNamesIfCoercion (IfaceSubCo _ co)
-  = freeNamesIfCoercion co
-freeNamesIfCoercion (IfaceAxiomRuleCo _ax cos)
+freeNamesIfCoercionRep (IfaceSymCo c)
+  = freeNamesIfCoercionRep c
+freeNamesIfCoercionRep (IfaceTransCo c1 c2)
+  = freeNamesIfCoercionRep c1 &&& freeNamesIfCoercionRep c2
+freeNamesIfCoercionRep (IfaceNthCo _ co)
+  = freeNamesIfCoercionRep co
+freeNamesIfCoercionRep (IfaceLRCo _ co)
+  = freeNamesIfCoercionRep co
+freeNamesIfCoercionRep (IfaceInstCo co co2)
+  = freeNamesIfCoercionRep co &&& freeNamesIfCoercionRep co2
+freeNamesIfCoercionRep (IfaceCoherenceCo c1 c2)
+  = freeNamesIfCoercionRep c1 &&& freeNamesIfCoercion c2
+freeNamesIfCoercionRep (IfaceKindCo c)
+  = freeNamesIfCoercionRep c
+freeNamesIfCoercionRep (IfaceSubCo _ co)
+  = freeNamesIfCoercionRep co
+freeNamesIfCoercionRep (IfaceAxiomRuleCo _ax cos)
   -- the axiom is just a string, so we don't count it as a name.
-  = fnList freeNamesIfCoercion cos
+  = fnList freeNamesIfCoercionRep cos
 
 freeNamesIfProv :: IfaceUnivCoProv -> NameSet
 freeNamesIfProv IfaceUnsafeCoerceProv    = emptyNameSet
-freeNamesIfProv (IfacePhantomProv co)    = freeNamesIfCoercion co
-freeNamesIfProv (IfaceProofIrrelProv co) = freeNamesIfCoercion co
+freeNamesIfProv (IfacePhantomProv co)    = freeNamesIfCoercionRep co
+freeNamesIfProv (IfaceProofIrrelProv co) = freeNamesIfCoercionRep co
 freeNamesIfProv (IfacePluginProv _)      = emptyNameSet
 
 freeNamesIfTvBndrs :: [IfaceTvBndr] -> NameSet

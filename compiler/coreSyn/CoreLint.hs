@@ -1306,9 +1306,9 @@ lintCoercion co@(CachedCoercion { coercionKind = Pair cached_ty1 cached_ty2
 
 lintCoercionRep :: CoercionRep
                 -> LintM (LintedKind, LintedKind, LintedType, LintedType, Role)
-lintCoercionRep (Refl r ty)
+lintCoercionRep co@(Refl r ty)
   = do { k <- lintType ty
-       ; checkForSynonyms ty
+       ; checkForSynonyms co ty
        ; return (k, k, ty, ty, r) }
 
 lintCoercionRep co@(TyConAppCo r tc cos)
@@ -1373,6 +1373,8 @@ lintCoercionRep (CoVarCo cv)
 lintCoercionRep co@(UnivCo prov r ty1 ty2)
   = do { k1 <- lintType ty1
        ; k2 <- lintType ty2
+       ; checkForSynonyms co ty1
+       ; checkForSynonyms co ty2
        ; case prov of
            UnsafeCoerceProv -> return ()  -- no extra checks
 
@@ -1462,8 +1464,8 @@ lintCoercionRep (InstCo co arg)
             | k1' `eqType` tyVarKind tv1
             , k2' `eqType` tyVarKind tv2
             -> return (k3, k4,
-                       substTyWith [tv1] [s1] t1,
-                       substTyWith [tv2] [s2] t2, r)
+                       substTyWithAddInScope [tv1] [s1] t1,
+                       substTyWithAddInScope [tv2] [s2] t2, r)
             | otherwise
             -> failWithL (text "Kind mis-match in inst coercion")
           _ -> failWithL (text "Bad argument of inst") }
@@ -1523,7 +1525,7 @@ lintCoercionRep co@(SubCo r co')
                (vcat [ text "SubCo makes a role stricter, from" <+> ppr r' <+>
                        text "to" <+> ppr r
                      , text "Coercion:" <+> ppr co ])
-       ; return (k1,k2,s,t,Representational) }
+       ; return (k1,k2,s,t,r) }
 
 lintCoercionRep this@(AxiomRuleCo co cs)
   = do { eqs <- mapM lintCoercionRep cs
@@ -1559,11 +1561,12 @@ lintUnliftedCoVar cv
                  <+> dcolon <+> ppr (coVarKind cv))
 
 ----------
-checkForSynonyms :: Type -> LintM ()
-checkForSynonyms ty
+checkForSynonyms :: CoercionRep -> Type -> LintM ()
+checkForSynonyms co ty
   | expandTypeSynonyms ty `pickyEqType` ty = return ()
   | otherwise
-  = failWithL (text "Type synonym in type in coercion:" <+> ppr ty)
+  = failWithL (vcat [ text "Type synonym in type in coercion:" <+> ppr ty
+                    , text "Coercion:" <+> ppr co ])
 
 
 {-

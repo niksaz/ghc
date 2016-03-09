@@ -1311,7 +1311,7 @@ zonkTcTyVar tv
                     Flexi       -> zonk_kind_and_return
                     Indirect ty -> zonkTcType ty }
 
-  | otherwise -- coercion variable
+  | otherwise
   = zonk_kind_and_return
   where
     zonk_kind_and_return = do { z_tv <- zonkTyCoVarKind tv

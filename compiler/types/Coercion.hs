@@ -24,7 +24,7 @@ module Coercion (
 
         -- ** Constructing coercions
         mkCoercion,
-        mkReflCo, mkRepReflCo, mkNomReflCo,
+        mkReflCo, mkReflCo_NoSyns, mkRepReflCo, mkNomReflCo,
         mkCoVarCo, mkCoVarCos,
         mkAxInstCo, mkUnbranchedAxInstCo,
         mkAxInstRHS, mkUnbranchedAxInstRHS,
@@ -349,7 +349,7 @@ getCoVar_maybe _                                             = Nothing
 splitTyConAppCo_maybe :: CoercionRep -> Maybe (TyCon, [CoercionRep])
 splitTyConAppCo_maybe (Refl r ty)
   = do { (tc, tys) <- splitTyConApp_maybe ty
-       ; let args = zipWith mkReflCoRep (tyConRolesX r tc) tys
+       ; let args = zipWith mkReflCoRep_NoSyns (tyConRolesX r tc) tys
        ; return (tc, args) }
 splitTyConAppCo_maybe (TyConAppCo _ tc cos) = Just (tc, cos)
 splitTyConAppCo_maybe _                     = Nothing
@@ -367,7 +367,7 @@ splitAppCo_maybe (TyConAppCo r tc args)
 
 splitAppCo_maybe (Refl r ty)
   | Just (ty1, ty2) <- splitAppTy_maybe ty
-  = Just (mkReflCoRep r ty1, mkReflCoRep Nominal ty2)
+  = Just (mkReflCoRep_NoSyns r ty1, mkReflCoRep_NoSyns Nominal ty2)
 splitAppCo_maybe _ = Nothing
 
 splitForAllCo_maybe :: CoercionRep
@@ -571,21 +571,33 @@ using, say, coercionKind.
 -- when filling a CoercionHole.
 mkCoercion :: CoercionRep -> Role -> Type -> Type -> Coercion
 mkCoercion rep role ty1 ty2
-  = CachedCoercion { coercionKind    = Pair ty1 ty2
-                   , coercionRole    = role
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoRepAcc rep
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = rep }
+  = CachedCoercion { coercionKind   = Pair ty1 ty2
+                   , coercionRole   = role
+                   , coercionRepFVs = tyCoVarsOfCoRepAcc rep
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = rep }
 
 mkReflCo :: Role -> Type -> Coercion
 mkReflCo r ty
-  = CachedCoercion { coercionKind    = Pair ty' ty'
-                   , coercionRole    = r
-                   , tyCoVarsOfCoAcc = tyCoVarsOfTypeAcc ty'
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkReflCoRep r ty' }
+  = CachedCoercion { coercionKind   = Pair ty ty
+                   , coercionRole   = r
+                   , coercionRepFVs = tyCoVarsOfCoRepAcc rep
+                          -- just get the FVs of the expanded type;
+                          -- See Note [Type synonyms in coercions] in TyCoRep
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkReflCoRep r ty }
   where
-    ty' = expandTypeSynonyms ty
+    rep = mkReflCoRep r ty
+
+-- | Like mkReflCo, but the caller ensures that there are no type synonyms
+-- anywhere in the given type.
+mkReflCo_NoSyns :: Role -> Type -> Coercion
+mkReflCo_NoSyns r ty
+  = CachedCoercion { coercionKind   = Pair ty ty
+                   , coercionRole   = r
+                   , coercionRepFVs = tyCoVarsOfTypeAcc ty
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = Refl r ty }
 
 -- | Make a representational reflexive coercion
 mkRepReflCo :: Type -> Coercion
@@ -604,12 +616,12 @@ mkTyConAppCo r tc cos
   = mkAppCos (liftCoSubst r (mkLiftingContext tv_co_prs) rhs_ty) leftover_cos
 
   | otherwise
-  = CachedCoercion { coercionKind    = mkTyConApp tc <$>
-                                       (sequenceA $ map coercionKind cos)
-                   , coercionRole    = r
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc cos
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkTyConAppCoRep r tc (map coercionRep cos) }
+  = CachedCoercion { coercionKind   = mkTyConApp tc <$>
+                                      (sequenceA $ map coercionKind cos)
+                   , coercionRole   = r
+                   , coercionRepFVs = mapUnionFV coercionRepFVs cos
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkTyConAppCoRep r tc (map coercionRep cos) }
 
 -- | Make a function 'Coercion' between two other 'Coercion's
 mkFunCo :: Role -> Coercion -> Coercion -> Coercion
@@ -626,14 +638,14 @@ mkAppCo :: Coercion     -- ^ :: t1 ~r t2
         -> Coercion     -- ^ :: s1 ~N s2
         -> Coercion     -- ^ :: t1 s1 ~r t2 s2
 mkAppCo co1 co2
-  = CachedCoercion { coercionKind    = mkAppTy <$> coercionKind co1
+  = CachedCoercion { coercionKind   = mkAppTy <$> coercionKind co1
                                                <*> coercionKind co2
-                   , coercionRole    = coercionRole co1
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co1 `unionFV`
-                                       tyCoVarsOfCoAcc co2
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkAppCoRep (coercionRep co1)
-                                                  (coercionRep co2) }
+                   , coercionRole   = coercionRole co1
+                   , coercionRepFVs = coercionRepFVs co1 `unionFV`
+                                       coercionRepFVs co2
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkAppCoRep (coercionRep co1)
+                                                 (coercionRep co2) }
 
 -- | Applies multiple 'Coercion's to another 'Coercion', from left to right.
 -- See also 'mkAppCo'.
@@ -708,15 +720,15 @@ mkTransAppCo r1 co1 ty1a ty1b r2 co2 ty2a ty2b r3
 -- The kind of the tyvar should be the left-hand kind of the kind coercion.
 mkForAllCo :: TyVar -> VisibilityFlag -> Coercion -> Coercion -> Coercion
 mkForAllCo tv1 vis kind_co co
-  = CachedCoercion { coercionKind    = mkNamedForAllTy <$> Pair tv1 tv2
-                                                       <*> pure vis
-                                                       <*> Pair ty1 ty2'
-                   , coercionRole    = coercionRole co
-                   , tyCoVarsOfCoAcc = delFV tv1 (tyCoVarsOfCoAcc co)
-                                       `unionFV` tyCoVarsOfCoAcc kind_co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkForAllCoRep tv1 vis kind_co
-                                                     (coercionRep co) }
+  = CachedCoercion { coercionKind   = mkNamedForAllTy <$> Pair tv1 tv2
+                                                      <*> pure vis
+                                                      <*> Pair ty1 ty2'
+                   , coercionRole   = coercionRole co
+                   , coercionRepFVs = delFV tv1 (coercionRepFVs co)
+                                      `unionFV` tyCoVarsOfCoAcc kind_co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkForAllCoRep tv1 vis kind_co
+                                                    (coercionRep co) }
   where
     Pair _ k2    = coercionKind kind_co
     tv2          = setTyVarKind tv1 k2
@@ -734,16 +746,16 @@ mkForAllCo tv1 vis kind_co co
 -- | Make nested ForAllCos
 mkForAllCos :: [(TyVar, VisibilityFlag, Coercion)] -> Coercion -> Coercion
 mkForAllCos bndrs co
-  = CachedCoercion { coercionKind    = mkForAllTys
-                                         <$> (liftA2 (zipWith mkNamedBinder)
-                                              (pure viss) (Pair tv1s tv2s))
-                                         <*> Pair ty1 ty2'
-                   , coercionRole    = coercionRole co
-                   , tyCoVarsOfCoAcc = fvs
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = foldr (\(tv, vis, kco) -> mkForAllCoRep tv vis kco)
-                                             (coercionRep co)
-                                             bndrs }
+  = CachedCoercion { coercionKind   = mkForAllTys
+                                        <$> (liftA2 (zipWith mkNamedBinder)
+                                             (pure viss) (Pair tv1s tv2s))
+                                        <*> Pair ty1 ty2'
+                   , coercionRole   = coercionRole co
+                   , coercionRepFVs = fvs
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = foldr (\(tv, vis, kco) -> mkForAllCoRep tv vis kco)
+                                            (coercionRep co)
+                                            bndrs }
   where
     (tv1s, viss, kind_cos) = unzip3 bndrs
     k2s                    = map (pSnd . coercionKind) kind_cos
@@ -755,7 +767,7 @@ mkForAllCos bndrs co
                                  | (tv2, kind_co) <- tv2s `zip` kind_cos ]
                                ty2
 
-    fvs = foldr go_fv (tyCoVarsOfCoAcc co) bndrs
+    fvs = foldr go_fv (coercionRepFVs co) bndrs
     go_fv (tv, _, kind_co) fv a b c
       = (delFV tv fv `unionFV` tyCoVarsOfCoAcc kind_co) a b c
 
@@ -771,12 +783,12 @@ mkHomoForAllCos tvs co = mkHomoForAllCos_NoRefl tvs co
 -- is reflexive.
 mkHomoForAllCos_NoRefl :: [TyVar] -> Coercion -> Coercion
 mkHomoForAllCos_NoRefl tvs orig_co
-  = CachedCoercion { coercionKind    = mkInvForAllTys tvs <$> coercionKind orig_co
-                   , coercionRole    = coercionRole orig_co
-                   , tyCoVarsOfCoAcc = delFVs (mkVarSet tvs) $
-                                       tyCoVarsOfCoAcc orig_co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = foldr go (coercionRep orig_co) tvs }
+  = CachedCoercion { coercionKind   = mkInvForAllTys tvs <$> coercionKind orig_co
+                   , coercionRole   = coercionRole orig_co
+                   , coercionRepFVs = delFVs (mkVarSet tvs) $
+                                      coercionRepFVs orig_co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = foldr go (coercionRep orig_co) tvs }
   where
     go tv co = ForAllCo tv Invisible (mkReflCo Nominal (tyVarKind tv)) co
 
@@ -785,13 +797,13 @@ mkCoVarCo :: CoVar -> Coercion
 mkCoVarCo cv
   | ty1 `eqType` ty2 = mkReflCo r ty1
   | otherwise
-  = CachedCoercion { coercionKind    = Pair ty1 ty2
-                   , coercionRole    = r
-                   , tyCoVarsOfCoAcc = oneVar cv `unionFV`
-                                       tyCoVarsOfTypesAcc [ty1, ty2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = CoVarCo cv }
+  = CachedCoercion { coercionKind   = Pair ty1 ty2
+                   , coercionRole   = r
+                   , coercionRepFVs = tyCoVarsOfCoRepAcc rep
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = rep }
   where
+    rep                 = mkCoVarCoRep cv
     (_, _, ty1, ty2, r) = coVarKindsTypesRole cv
 
 mkCoVarCos :: [CoVar] -> [Coercion]
@@ -830,12 +842,12 @@ mkAxInstCo role ax index tys cos
 
 mkAxiomInstCo :: CoAxiom Branched -> BranchIndex -> [Coercion] -> Coercion
 mkAxiomInstCo ax index args
-  = CachedCoercion { coercionKind    = Pair ty1 ty2
-                   , coercionRole    = coAxiomRole ax
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc args
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkAxiomInstCoRep ax index
-                                                        (map coercionRep args) }
+  = CachedCoercion { coercionKind   = Pair ty1 ty2
+                   , coercionRole   = coAxiomRole ax
+                   , coercionRepFVs = mapUnionFV coercionRepFVs args
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkAxiomInstCoRep ax index
+                                                       (map coercionRep args) }
   where
     CoAxBranch { cab_tvs = tvs, cab_cvs = cvs
                , cab_lhs = lhs, cab_rhs = rhs } = coAxiomNthBranch ax index
@@ -910,56 +922,56 @@ mkUnbranchedAxInstLHS ax = mkAxInstLHS ax 0
 --   down through type constructors.
 mkUnsafeCo :: Role -> Type -> Type -> Coercion
 mkUnsafeCo role ty1 ty2
-  = CachedCoercion { coercionKind    = Pair ty1 ty2
-                   , coercionRole    = role
-                   , tyCoVarsOfCoAcc = tyCoVarsOfTypesAcc [ty1, ty2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkUnivCoRep UnsafeCoerceProv role ty1 ty2 }
+  = CachedCoercion { coercionKind   = Pair ty1 ty2
+                   , coercionRole   = role
+                   , coercionRepFVs = tyCoVarsOfTypesAcc [ty1, ty2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkUnivCoRep UnsafeCoerceProv role ty1 ty2 }
 
 -- | Make a coercion from a coercion hole
 mkHoleCo :: CoercionHole -> Role
          -> Type -> Type -> Coercion
 mkHoleCo h r t1 t2
-  = CachedCoercion { coercionKind    = Pair t1 t2
-                   , coercionRole    = r
-                   , tyCoVarsOfCoAcc = tyCoVarsOfTypesAcc [t1, t2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkUnivCoRep (HoleProv h) r t1 t2 }
+  = CachedCoercion { coercionKind   = Pair t1 t2
+                   , coercionRole   = r
+                   , coercionRepFVs = tyCoVarsOfTypesAcc [t1, t2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkUnivCoRep (HoleProv h) r t1 t2 }
 
 -- | Make a universal coercion between two arbitrary types.
 mkUnivCo :: UnivCoProvenance
-         -> FV         -- ^ of the entire coercion; include the FVs of the types
          -> Role       -- ^ role of the built coercion, "r"
          -> Type       -- ^ t1 :: k1
          -> Type       -- ^ t2 :: k2
          -> Coercion   -- ^ :: t1 ~r t2
-mkUnivCo prov fv role ty1 ty2
-  = CachedCoercion { coercionKind    = Pair ty1 ty2
-                   , coercionRole    = role
-                   , tyCoVarsOfCoAcc = fv
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkUnivCoRep prov role ty1 ty2 }
+mkUnivCo prov role ty1 ty2
+  = CachedCoercion { coercionKind   = Pair ty1 ty2
+                   , coercionRole   = role
+                   , coercionRepFVs = tyCoVarsOfProvAcc prov `unionFV`
+                                      mapUnionFV tyCoVarsOfTypeAcc [ty1, ty2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkUnivCoRep prov role ty1 ty2 }
 
 -- | Create a symmetric version of the given 'Coercion' that asserts
 --   equality between the same types but in the other "direction", so
 --   a kind of @t1 ~ t2@ becomes the kind @t2 ~ t1@.
 mkSymCo :: Coercion -> Coercion
 mkSymCo co
-  = CachedCoercion { coercionKind    = swap (coercionKind co)
-                   , coercionRole    = coercionRole co
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkSymCoRep (coercionRep co) }
+  = CachedCoercion { coercionKind   = swap (coercionKind co)
+                   , coercionRole   = coercionRole co
+                   , coercionRepFVs = coercionRepFVs co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkSymCoRep (coercionRep co) }
 
 -- | Create a new 'Coercion' by composing the two given 'Coercion's transitively.
 mkTransCo :: Coercion -> Coercion -> Coercion
 mkTransCo co1 co2
-  = CachedCoercion { coercionKind    = Pair ty1 ty3
-                   , coercionRole    = coercionRole co1
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc [co1, co2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkTransCoRep (coercionRep co1)
-                                                    (coercionRep co2) }
+  = CachedCoercion { coercionKind   = Pair ty1 ty3
+                   , coercionRole   = coercionRole co1
+                   , coercionRepFVs = mapUnionFV coercionRepFVs [co1, co2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkTransCoRep (coercionRep co1)
+                                                   (coercionRep co2) }
   where
     Pair ty1 _ty2 = coercionKind co1
     Pair _t2 ty3  = coercionKind co2
@@ -975,11 +987,11 @@ mkNthCoRole role n co
 
 mkNthCo :: Int -> Coercion -> Coercion
 mkNthCo n co
-  = CachedCoercion { coercionKind    = nth_tys
-                   , coercionRole    = nth_role
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkNthCoRep n (coercionRep co) }
+  = CachedCoercion { coercionKind   = nth_tys
+                   , coercionRole   = nth_role
+                   , coercionRepFVs = coercionRepFVs co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkNthCoRep n (coercionRep co) }
   where
     Pair ty1 ty2 = coercionKind co
     role         = coercionRole co
@@ -999,23 +1011,23 @@ mkNthCo n co
 
 mkLRCo :: LeftOrRight -> Coercion -> Coercion
 mkLRCo lr co
-  = CachedCoercion { coercionKind    = (pickLR lr . splitAppTy) <$>
-                                       coercionKind co
-                   , coercionRole    = Nominal
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkLRCoRep lr (coercionRep co) }
+  = CachedCoercion { coercionKind   = (pickLR lr . splitAppTy) <$>
+                                      coercionKind co
+                   , coercionRole   = Nominal
+                   , coercionRepFVs = coercionRepFVs co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkLRCoRep lr (coercionRep co) }
 
 -- | Instantiates a 'Coercion'.
 mkInstCo :: Coercion -> Coercion -> Coercion
 mkInstCo co arg
-  = CachedCoercion { coercionKind    = kind
-                   , coercionRole    = coercionRole co
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co `unionFV`
-                                       tyCoVarsOfCoAcc arg
-                   , coercionInfo    = info
-                   , coercionRep     = mkInstCoRep (coercionRep co)
-                                                   (coercionRep arg) }
+  = CachedCoercion { coercionKind   = kind
+                   , coercionRole   = coercionRole co
+                   , coercionRepFVs = coercionRepFVs co `unionFV`
+                                      coercionRepFVs arg
+                   , coercionInfo   = info
+                   , coercionRep    = mkInstCoRep (coercionRep co)
+                                                  (coercionRep arg) }
   where
     arg_kind = coercionKind arg
 
@@ -1045,12 +1057,12 @@ mkInstCo co arg
 -- quite inefficient. Seems better not to try.
 mkCoherenceCo :: Coercion -> Coercion -> Coercion
 mkCoherenceCo co1 co2
-  = CachedCoercion { coercionKind    = pLiftFst (`mkCastTy` co2) $
-                                       coercionKind co1
-                   , coercionRole    = coercionRole co1
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc [co1, co2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkCoherenceCoRep (coercionRep co1) co2 }
+  = CachedCoercion { coercionKind   = pLiftFst (`mkCastTy` co2) $
+                                      coercionKind co1
+                   , coercionRole   = coercionRole co1
+                   , coercionRepFVs = mapUnionFV coercionRepFVs [co1, co2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkCoherenceCoRep (coercionRep co1) co2 }
 
 -- | A CoherenceCo c1 c2 applies the coercion c2 to the left-hand type
 -- in the kind of c1. This function uses sym to get the coercion on the
@@ -1071,28 +1083,28 @@ infixl 5 `mkCoherenceLeftCo`
 
 mkKindCo :: Coercion -> Coercion
 mkKindCo co
-  = CachedCoercion { coercionKind    = typeKind <$> coercionKind co
-                   , coercionRole    = Nominal
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkKindCoRep (coercionRep co) }
+  = CachedCoercion { coercionKind   = typeKind <$> coercionKind co
+                   , coercionRole   = Nominal
+                   , coercionRepFVs = coercionRepFVs co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkKindCoRep (coercionRep co) }
 
 -- input coercion is Nominal; see also Note [Role twiddling functions]
 mkSubCo :: CoercionN -> CoercionR
 mkSubCo co
-  = CachedCoercion { coercionKind    = coercionKind co
-                   , coercionRole    = Representational
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkSubCoRep (coercionRep co) }
+  = CachedCoercion { coercionKind   = coercionKind co
+                   , coercionRole   = Representational
+                   , coercionRepFVs = coercionRepFVs co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkSubCoRep (coercionRep co) }
 
 mkSubRoleCo :: Role -> Coercion -> Coercion
 mkSubRoleCo r co
-  = CachedCoercion { coercionKind    = coercionKind co
-                   , coercionRole    = r
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoAcc co
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkSubRoleCoRep r (coercionRep co) }
+  = CachedCoercion { coercionKind   = coercionKind co
+                   , coercionRole   = r
+                   , coercionRepFVs = coercionRepFVs co
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkSubRoleCoRep r (coercionRep co) }
 
 -- | Changes a role, but only a downgrade. See Note [Role twiddling functions]
 downgradeRole_maybe :: Role   -- ^ desired role
@@ -1125,12 +1137,12 @@ maybeSubCo ReprEq = mkSubCo
 
 mkAxiomRuleCo :: CoAxiomRule -> [Coercion] -> Coercion
 mkAxiomRuleCo rule cos
-  = CachedCoercion { coercionKind    = expectJust "mkAxiomRuleCo" $
-                                       coaxrProves rule (map coercionKind cos)
-                   , coercionRole    = coaxrRole rule
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc cos
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = AxiomRuleCo rule (map coercionRep cos) }
+  = CachedCoercion { coercionKind   = expectJust "mkAxiomRuleCo" $
+                                      coaxrProves rule (map coercionKind cos)
+                   , coercionRole   = coaxrRole rule
+                   , coercionRepFVs = mapUnionFV coercionRepFVs cos
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = AxiomRuleCo rule (map coercionRep cos) }
 
 -- | Make a "coercion between coercions".
 mkProofIrrelCo :: Role       -- ^ role of the created coercion, "r"
@@ -1141,15 +1153,16 @@ mkProofIrrelCo :: Role       -- ^ role of the created coercion, "r"
 mkProofIrrelCo r kco g1 g2
     -- if the two coercion prove the same fact, I just don't care what
     -- the individual coercions are.
-  | isReflCo kco = mkReflCo r (CoercionTy g1)
+  | isReflCo kco = mkReflCo_NoSyns r (CoercionTy g1)
 
   | otherwise
-  = CachedCoercion { coercionKind    = Pair ty1 ty2
-                   , coercionRole    = r
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc [kco, g1, g2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkUnivCoRep (ProofIrrelProv (coercionRep kco))
-                                                   r ty1 ty2 }
+  = CachedCoercion { coercionKind   = Pair ty1 ty2
+                   , coercionRole   = r
+                   , coercionRepFVs = coercionRepFVs kco `unionFV`
+                                      mapUnionFV tyCoVarsOfCoAcc [g1, g2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkUnivCoRep (ProofIrrelProv (coercionRep kco))
+                                                  r ty1 ty2 }
   where
     ty1 = mkCoercionTy g1
     ty2 = mkCoercionTy g2
@@ -1159,11 +1172,11 @@ mkProofIrrelCo r kco g1 g2
 -- being inspected, and that shouldn't happen, outside of OptCoercion.
 mkCachedCoercion :: CoercionRep -> Coercion
 mkCachedCoercion rep
-  = CachedCoercion { coercionKind    = kind
-                   , coercionRole    = role
-                   , tyCoVarsOfCoAcc = tyCoVarsOfCoRepAcc rep
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = rep }
+  = CachedCoercion { coercionKind   = kind
+                   , coercionRole   = role
+                   , coercionRepFVs = tyCoVarsOfCoRepAcc rep
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = rep }
   where
     (kind, role) = coercionRepKindRole rep
 
@@ -1213,13 +1226,13 @@ setNominalRole_maybe = go
 -- types.
 mkPhantomCo :: Coercion -> Type -> Type -> Coercion
 mkPhantomCo h t1 t2
-  = CachedCoercion { coercionKind    = Pair t1 t2
-                   , coercionRole    = Phantom
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfTypeAcc [t1, t2]
-                                       `unionFV` tyCoVarsOfCoAcc h
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = mkUnivCoRep (PhantomProv (coercionRep h))
-                                                   Phantom t1 t2 }
+  = CachedCoercion { coercionKind   = Pair t1 t2
+                   , coercionRole   = Phantom
+                   , coercionRepFVs = mapUnionFV tyCoVarsOfTypeAcc [t1, t2]
+                                      `unionFV` coercionRepFVs h
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = mkUnivCoRep (PhantomProv (coercionRep h))
+                                                  Phantom t1 t2 }
 
 -- | Make a phantom coercion between two types of the same kind.
 mkHomoPhantomCo :: Type -> Type -> Coercion
@@ -1266,11 +1279,12 @@ ltRole Nominal          _       = True
 -- The second and third coercions must be nominal.
 castCoercionKind :: Coercion -> Coercion -> Coercion -> Coercion
 castCoercionKind g h1 h2
-  = CachedCoercion { coercionKind    = mkCastTy <$> coercionKind g <*> Pair h1 h2
-                   , coercionRole    = coercionRole g
-                   , tyCoVarsOfCoAcc = mapUnionFV tyCoVarsOfCoAcc [g, h1, h2]
-                   , coercionInfo    = NoCachedInfo
-                   , coercionRep     = castCoercionKindRep (coercionRep g)
+  = CachedCoercion { coercionKind   = mkCastTy <$> coercionKind g <*> Pair h1 h2
+                   , coercionRole   = coercionRole g
+                   , coercionRepFVs = coercionRepFVs g `unionFV`
+                                      mapUnionFV tyCoVarsOfCoAcc [h1, h2]
+                   , coercionInfo   = NoCachedInfo
+                   , coercionRep    = castCoercionKindRep (coercionRep g)
                                                            h1 h2 }
 
 -- See note [Newtype coercions] in TyCon
@@ -1737,7 +1751,7 @@ ty_co_subst lc = go
                            = let (lc', v', h) = liftCoSubstVarBndr lc v in
                              mkForAllCo v' vis h $! ty_co_subst lc' r ty
     go r ty@(LitTy {})     = ASSERT( r == Nominal )
-                             mkReflCo r ty
+                             mkReflCo_NoSyns r ty
     go r (CastTy ty co)    = castCoercionKind (go r ty) (substLeftCo lc co)
                                                         (substRightCo lc co)
     go r (CoercionTy co)   = mkProofIrrelCo r (go Nominal (coercionType co))
@@ -1896,10 +1910,10 @@ seqCoReps (co:cos) = seqCoRep co `seq` seqCoReps cos
 seqCo :: Coercion -> ()
   -- NB: Don't evaluate the coercionInfo, as that duplicates work
   -- with coercionKind. See Note [Nested InstCos].
-seqCo (CachedCoercion { coercionKind    = Pair ty1 ty2
-                      , coercionRole    = role
-                      , tyCoVarsOfCoAcc = fvs
-                      , coercionRep     = rep })
+seqCo (CachedCoercion { coercionKind   = Pair ty1 ty2
+                      , coercionRole   = role
+                      , coercionRepFVs = fvs
+                      , coercionRep    = rep })
   = seqType ty1 `seq`
     seqType ty2 `seq`
     role `seq`

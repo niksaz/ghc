@@ -1233,20 +1233,31 @@ normaliseTcApp env role tc tys
 -- See Note [Normalising types]
 normalise_tc_app :: TyCon -> [Type] -> NormM Coercion
 normalise_tc_app tc tys
-  | Just (tenv, rhs, leftover_tys) <- expandSynTyCon_maybe tc tys
-  = normalise_type (substTy (mkTvSubstPrs tenv) rhs `mkAppTys` leftover_tys)
-  | otherwise
   = do { args_cos <- normalise_tc_args tc tys
-       ; env <- getEnv
        ; role <- getRole
-       ; let args_co = mkTyConAppCo role tc args_cos
-       ; case reduceTyFamApp_maybe env role tc (map (pSnd . coercionKind) args_cos) of
+       ; let ntys = map (pSnd . coercionKind) args_cos
+             args_co = mkTyConAppCo role tc args_cos
+       ; case expandSynTyCon_maybe tc ntys of
+         { Just (tenv, rhs, ntys') ->
+           do { co2 <- normalise_type (substTy (mkTvSubstPrs tenv) rhs `mkAppTys` ntys')
+              ; return $
+                if isReflCo co2
+                then args_co
+                else args_co `mkTransCo` co2 }
+                  -- But doesn't mkTransCo automatically ignore reflexive coercions?
+                  -- It does, but if co2 is reflexive, then it means that we don't
+                  -- have to unwrap the type synonym. This means that args_co will have
+                  -- a better type to report to the user than the transitivity coercion,
+                  -- which will get the expanded type from co2.
+         ; Nothing ->
+    do { env <- getEnv
+       ; case reduceTyFamApp_maybe env role tc ntys of
            Just (first_co, ty')
              -> do { rest_co <- normalise_type ty'
                    ; return (args_co `mkTransCo` first_co `mkTransCo` rest_co) }
            _ -> -- No unique matching family instance exists;
                 -- we do not do anything
-                return args_co }
+                return args_co }}}
 
 ---------------
 -- | Normalise arguments to a tycon
