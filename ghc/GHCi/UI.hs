@@ -374,8 +374,8 @@ findEditor = do
 
 default_progname, default_prompt, default_prompt2, default_stop :: String
 default_progname = "<interactive>"
-default_prompt = "%s> "
-default_prompt2 = "%s| "
+default_prompt = "number of loaded modules: %n> "
+default_prompt2 = "number of loaded modules: %n| "
 default_stop = ""
 
 default_args :: [String]
@@ -722,11 +722,15 @@ mkPrompt = do
 
         deflt_prompt = dots <> context_bit <> modules_bit
 
-        f ('%':'l':xs) = ppr (1 + line_number st) <> f xs
-        f ('%':'s':xs) = deflt_prompt <> f xs
-        f ('%':'%':xs) = char '%' <> f xs
+        f ('%':'n':xs) = ppr (length imports) <> f xs
         f (x:xs) = char x <> f xs
         f [] = empty
+
+        -- f ('%':'l':xs) = ppr (1 + line_number st) <> f xs
+        -- f ('%':'s':xs) = deflt_prompt <> f xs
+        -- f ('%':'%':xs) = char '%' <> f xs
+        -- f (x:xs) = char x <> f xs
+        -- f [] = empty
 
   dflags <- getDynFlags
   return (showSDoc dflags (f (prompt st)))
