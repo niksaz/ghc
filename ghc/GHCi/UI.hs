@@ -113,6 +113,8 @@ import Text.Printf
 import Text.Read ( readMaybe )
 import Text.Read.Lex (isSymbolChar)
 
+import Unsafe.Coerce
+
 #ifndef mingw32_HOST_OS
 import System.Posix hiding ( getEnv )
 #else
@@ -129,8 +131,8 @@ data GhciSettings = GhciSettings {
         availableCommands :: [Command],
         shortHelpText     :: String,
         fullHelpText      :: String,
-        defPrompt         :: String,
-        defPrompt2        :: String
+        defPrompt         :: PromptFunction,
+        defPrompt2        :: PromptFunction
     }
 
 defaultGhciSettings :: GhciSettings
@@ -329,6 +331,8 @@ defFullHelpText =
   "   :set prog <progname>        set the value returned by System.getProgName\n" ++
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
   "   :set prompt2 <prompt>       set the continuation prompt used in GHCi\n" ++
+  "   :set prompt-function <expr> set the function\n" ++
+  "   :set prompt2-function <expr>set the function\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -372,10 +376,16 @@ findEditor = do
         return ""
 #endif
 
-default_progname, default_prompt, default_prompt2, default_stop :: String
+--default_progname, default_prompt, default_prompt2, default_stop :: String
+default_progname, default_stop :: String
+default_prompt, default_prompt2 :: PromptFunction
+default_prompt mods num = return $ (show num) ++ "-" ++ moduleStringList ++  "> " 
+  where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
+default_prompt2 mods num = return $ (show num) ++ "-" ++ moduleStringList ++ "| "
+  where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
 default_progname = "<interactive>"
-default_prompt = "number of loaded modules: %n> "
-default_prompt2 = "number of loaded modules: %n| "
+--default_prompt = "number of loaded modules: %n> "
+--default_prompt2 = "number of loaded modules: %n| "
 default_stop = ""
 
 default_args :: [String]
@@ -438,8 +448,10 @@ interactiveUI config srcs maybe_exprs = do
         GHCiState{ progname           = default_progname,
                    args               = default_args,
                    evalWrapper        = eval_wrapper,
-                   prompt             = defPrompt config,
-                   prompt2            = defPrompt2 config,
+  --                 prompt             = defPrompt config,
+    --               prompt2            = defPrompt2 config,
+                   prompt             = default_prompt,
+                   prompt2            = default_prompt2,
                    stop               = default_stop,
                    editor             = default_editor,
                    options            = [],
@@ -689,11 +701,16 @@ fileLoop hdl = do
            incrementLineNo
            return (Just l')
 
+defFunc :: String
+defFunc = "Hello!> "
+
 mkPrompt :: GHCi String
 mkPrompt = do
   st <- getGHCiState
   imports <- GHC.getContext
   resumes <- GHC.getResumeContext
+  dflags <- getDynFlags
+  mods <- getLoadedModules
 
   context_bit <-
         case resumes of
@@ -712,19 +729,34 @@ mkPrompt = do
              | otherwise = empty
 
         rev_imports = reverse imports -- rightmost are the most recent
-        modules_bit =
-             hsep [ char '*' <> ppr m | IIModule m <- rev_imports ] <+>
-             hsep (map ppr [ myIdeclName d | IIDecl d <- rev_imports ])
+        -- modules_bit =
+        --     hsep [ char '*' <> ppr m | IIModule m <- rev_imports ] <+>
+        --     hsep (map ppr [ myIdeclName d | IIDecl d <- rev_imports ])
+       -- module_list = [char '*' <> ppr m | IIModule m <- rev_imports] ++
+         --             map ppr [ myIdeclName d | IIDecl d <- rev_imports ]
+        --module_string_list = map (showSDoc dflags) module_list
+        --deflt_prompt = dots <> context_bit <> hsep module_list
 
          --  use the 'as' name if there is one
-        myIdeclName d | Just m <- ideclAs d = m
-                      | otherwise           = unLoc (ideclName d)
+        --myIdeclName d | Just m <- ideclAs d = m
+        ---              | otherwise           = unLoc (ideclName d)
 
-        deflt_prompt = dots <> context_bit <> modules_bit
+       -- deflt_prompt = dots <> context_bit <> modules_bit
+        line_no = 1 + line_number st
+        module_list = map GHC.ms_mod mods
+     
+ -- TODO mods instead of []
+  promptString <- liftIO $ (prompt st) module_list line_no
 
+  let
         f ('%':'n':xs) = ppr (length imports) <> f xs
         f (x:xs) = char x <> f xs
         f [] = empty
+        
+        promptDoc = dots <> context_bit <> (f promptString)
+
+
+  return (showSDoc dflags promptDoc)
 
         -- f ('%':'l':xs) = ppr (1 + line_number st) <> f xs
         -- f ('%':'s':xs) = deflt_prompt <> f xs
@@ -732,8 +764,9 @@ mkPrompt = do
         -- f (x:xs) = char x <> f xs
         -- f [] = empty
 
-  dflags <- getDynFlags
-  return (showSDoc dflags (f (prompt st)))
+  -- dflags <- getDynFlags
+  -- return (showSDoc dflags (text defFunc))
+  -- return (showSDoc dflags (f (prompt st)))
 
 
 queryQueue :: GHCi (Maybe String)
@@ -2273,13 +2306,31 @@ setCmd str
         case toArgs rest of
             Right [prog] -> setProg prog
             _ -> liftIO (hPutStrLn stderr "syntax: :set prog <progname>")
-    Right ("prompt",  rest) -> setPrompt  $ dropWhile isSpace rest
-    Right ("prompt2", rest) -> setPrompt2 $ dropWhile isSpace rest
+    --Right ("prompt",  rest) -> setPrompt  $ dropWhile isSpace rest
+    --Right ("prompt2", rest) -> setPrompt2 $ dropWhile isSpace rest
+    Right ("prompt-function",  rest) ->
+        setPromptFunc setPrompt $ dropWhile isSpace rest
+    Right ("prompt",          rest) ->
+        setPromptString setPrompt (dropWhile isSpace rest) "syntax: :set prompt <string>"
+    Right ("prompt2-function", rest) ->
+        setPromptFunc setPrompt2 $ dropWhile isSpace rest
+    Right ("prompt2",         rest) ->
+        setPromptString setPrompt2 (dropWhile isSpace rest) "syntax: :set prompt2 <string>"
+
     Right ("editor",  rest) -> setEditor  $ dropWhile isSpace rest
     Right ("stop",    rest) -> setStop    $ dropWhile isSpace rest
     _ -> case toArgs str of
          Left err -> liftIO (hPutStrLn stderr err)
          Right wds -> setOptions wds
+
+setPromptFunc :: (PromptFunction -> GHCi ()) -> String -> GHCi ()
+setPromptFunc f s = do
+    -- We explicitly annotate the type of the expression to ensure
+    -- that unsafeCoerce# is passed the exact type necessary rather
+    -- than a more general one
+    let exprStr = "(" ++ s ++ ") :: [String] -> Int -> IO String"
+    (HValue funValue) <- GHC.compileExpr exprStr
+    f (unsafeCoerce funValue)
 
 setiCmd :: String -> GHCi ()
 setiCmd ""   = GHC.getInteractiveDynFlags >>= liftIO . showDynFlags False
@@ -2368,30 +2419,49 @@ setStop str@(c:_) | isDigit c
        setGHCiState st{ breaks = new_breaks }
 setStop cmd = modifyGHCiState (\st -> st { stop = cmd })
 
-setPrompt :: String -> GHCi ()
-setPrompt = setPrompt_ f err
-  where
-    f v st = st { prompt = v }
-    err st = "syntax: :set prompt <prompt>, currently \"" ++ prompt st ++ "\""
+--setPrompt :: String -> GHCi ()
+--setPrompt = setPrompt_ f err
+--  where
+--    f v st = st { prompt = v }
+--    err st = "syntax: :set prompt <prompt>, currently \"" ++ prompt st ++ "\""
+setPrompt :: PromptFunction -> GHCi ()
+setPrompt v = modifyGHCiState (\st -> st {prompt = v})
 
-setPrompt2 :: String -> GHCi ()
-setPrompt2 = setPrompt_ f err
-  where
-    f v st = st { prompt2 = v }
-    err st = "syntax: :set prompt2 <prompt>, currently \"" ++ prompt2 st ++ "\""
+-- setPromptFunc :: String -> GHCi ()
 
-setPrompt_ :: (String -> GHCiState -> GHCiState) -> (GHCiState -> String) -> String -> GHCi ()
-setPrompt_ f err value = do
-  st <- getGHCiState
-  if null value
-      then liftIO $ hPutStrLn stderr $ err st
-      else case value of
-           '\"' : _ -> case reads value of
-                       [(value', xs)] | all isSpace xs ->
-                           setGHCiState $ f value' st
-                       _ ->
-                           liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
-           _ -> setGHCiState $ f value st
+--setPrompt2 :: String -> GHCi ()
+--setPrompt2 = setPrompt_ f err
+--  where
+--    f v st = st { prompt2 = v }
+--    err st = "syntax: :set prompt2 <prompt>, currently \"" ++ prompt2 st ++ "\""
+
+setPrompt2 :: PromptFunction -> GHCi ()
+setPrompt2 v = modifyGHCiState (\st -> st {prompt2 = v})
+
+--setPrompt_ :: (String -> GHCiState -> GHCiState) -> (GHCiState -> String) -> String -> GHCi ()
+--setPrompt_ f err value = do
+--  st <- getGHCiState
+--  if null value
+--      then liftIO $ hPutStrLn stderr $ err st
+--      else case value of
+--           '\"' : _ -> case reads value of
+--                       [(value', xs)] | all isSpace xs ->
+--                           setGHCiState $ f value' st
+--                       _ ->
+--                           liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
+--           _ -> setGHCiState $ f value st
+
+setPromptString :: (PromptFunction -> GHCi ()) -> String -> String -> GHCi ()
+setPromptString f value err = do
+    if null value
+        then liftIO $ hPutStrLn stderr $ err
+        else case value of
+            '\"' : _ -> case reads value of
+                        [(value', xs)] | all isSpace xs ->
+                            f (\_ _ -> return value')
+                        _ ->
+                          liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
+            _ -> f (\_ _ -> return value)
 
 setOptions wds =
    do -- first, deal with the GHCi opts (+s, +t, etc.)
@@ -2477,8 +2547,10 @@ unsetOptions str
          defaulters =
            [ ("args"   , setArgs default_args)
            , ("prog"   , setProg default_progname)
-           , ("prompt" , setPrompt default_prompt)
-           , ("prompt2", setPrompt2 default_prompt2)
+  --         , ("prompt" , setPrompt default_prompt)
+  --         , ("prompt2", setPrompt2 default_prompt2)
+           , ("prompt", setPrompt default_prompt)
+           , ("prompt2", setPrompt2 default_prompt2) 
            , ("editor" , liftIO findEditor >>= setEditor)
            , ("stop"   , setStop default_stop)
            ]
@@ -2556,8 +2628,8 @@ showCmd str = do
         cmds =
             [ action "args"       $ liftIO $ putStrLn (show (GhciMonad.args st))
             , action "prog"       $ liftIO $ putStrLn (show (progname st))
-            , action "prompt"     $ liftIO $ putStrLn (show (prompt st))
-            , action "prompt2"    $ liftIO $ putStrLn (show (prompt2 st))
+            --, action "prompt"     $ liftIO $ putStrLn (show (prompt st))
+            --, action "prompt2"    $ liftIO $ putStrLn (show (prompt2 st))
             , action "editor"     $ liftIO $ putStrLn (show (editor st))
             , action "stop"       $ liftIO $ putStrLn (show (stop st))
             , action "imports"    $ showImports
