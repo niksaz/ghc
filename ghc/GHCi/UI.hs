@@ -701,9 +701,6 @@ fileLoop hdl = do
            incrementLineNo
            return (Just l')
 
-defFunc :: String
-defFunc = "Hello!> "
-
 mkPrompt :: GHCi String
 mkPrompt = do
   st <- getGHCiState
@@ -729,27 +726,23 @@ mkPrompt = do
              | otherwise = empty
 
         rev_imports = reverse imports -- rightmost are the most recent
-        -- modules_bit =
-        --     hsep [ char '*' <> ppr m | IIModule m <- rev_imports ] <+>
-        --     hsep (map ppr [ myIdeclName d | IIDecl d <- rev_imports ])
-       -- module_list = [char '*' <> ppr m | IIModule m <- rev_imports] ++
-         --             map ppr [ myIdeclName d | IIDecl d <- rev_imports ]
-        --module_string_list = map (showSDoc dflags) module_list
-        --deflt_prompt = dots <> context_bit <> hsep module_list
+        modules_bit =
+             hsep [ char '*' <> ppr m | IIModule m <- rev_imports ] <+>
+             hsep (map ppr [ myIdeclName d | IIDecl d <- rev_imports ])
 
          --  use the 'as' name if there is one
-        --myIdeclName d | Just m <- ideclAs d = m
-        ---              | otherwise           = unLoc (ideclName d)
+        myIdeclName d | Just m <- ideclAs d = m
+                      | otherwise           = unLoc (ideclName d)
 
-       -- deflt_prompt = dots <> context_bit <> modules_bit
+        deflt_prompt = dots <> context_bit <> modules_bit
         line_no = 1 + line_number st
-        module_list = map GHC.ms_mod mods
+        ms_mod_list = map GHC.ms_mod mods
      
- -- TODO mods instead of []
-  promptString <- liftIO $ (prompt st) module_list line_no
+  promptString <- liftIO $ (prompt st) ms_mod_list line_no
 
   let
-        f ('%':'n':xs) = ppr (length imports) <> f xs
+        f ('%':'s':xs) = deflt_prompt <> f xs
+        f ('%':'n':xs) = ppr line_no <> f xs
         f (x:xs) = char x <> f xs
         f [] = empty
         
@@ -2328,7 +2321,7 @@ setPromptFunc f s = do
     -- We explicitly annotate the type of the expression to ensure
     -- that unsafeCoerce# is passed the exact type necessary rather
     -- than a more general one
-    let exprStr = "(" ++ s ++ ") :: [String] -> Int -> IO String"
+    let exprStr = "(" ++ s ++ ") :: [Module] -> Int -> IO String"
     (HValue funValue) <- GHC.compileExpr exprStr
     f (unsafeCoerce funValue)
 
@@ -2547,8 +2540,8 @@ unsetOptions str
          defaulters =
            [ ("args"   , setArgs default_args)
            , ("prog"   , setProg default_progname)
-  --         , ("prompt" , setPrompt default_prompt)
-  --         , ("prompt2", setPrompt2 default_prompt2)
+           , ("prompt" , setPrompt default_prompt)
+           , ("prompt2", setPrompt2 default_prompt2)
            , ("prompt", setPrompt default_prompt)
            , ("prompt2", setPrompt2 default_prompt2) 
            , ("editor" , liftIO findEditor >>= setEditor)
@@ -2937,7 +2930,7 @@ listHomeModules w = do
 
 completeSetOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = "args":"prog":"prompt":"prompt2":"editor":"stop":flagList
+    where opts = "args":"prog":"prompt":"prompt2":"prompt-function":"prompt-function2":"editor":"stop":flagList
           flagList = map head $ group $ sort allNonDeprecatedFlags
 
 completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
