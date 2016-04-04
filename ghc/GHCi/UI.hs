@@ -332,7 +332,7 @@ defFullHelpText =
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
   "   :set prompt2 <prompt>       set the continuation prompt used in GHCi\n" ++
   "   :set prompt-function <expr> set the function\n" ++
-  "   :set prompt2-function <expr>set the function\n" ++
+  "   :set prompt-function2 <expr>set the function\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -2305,7 +2305,7 @@ setCmd str
         setPromptFunc setPrompt $ dropWhile isSpace rest
     Right ("prompt",          rest) ->
         setPromptString setPrompt (dropWhile isSpace rest) "syntax: :set prompt <string>"
-    Right ("prompt2-function", rest) ->
+    Right ("prompt-function2", rest) ->
         setPromptFunc setPrompt2 $ dropWhile isSpace rest
     Right ("prompt2",         rest) ->
         setPromptString setPrompt2 (dropWhile isSpace rest) "syntax: :set prompt2 <string>"
@@ -2321,7 +2321,7 @@ setPromptFunc f s = do
     -- We explicitly annotate the type of the expression to ensure
     -- that unsafeCoerce# is passed the exact type necessary rather
     -- than a more general one
-    let exprStr = "(" ++ s ++ ") :: [Module] -> Int -> IO String"
+    let exprStr = "(" ++ s ++ ") :: [PModule] -> Int -> IO String"
     (HValue funValue) <- GHC.compileExpr exprStr
     f (unsafeCoerce funValue)
 
