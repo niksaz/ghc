@@ -138,9 +138,9 @@ data Command
      -- ^ 'CompletionFunc' for arguments
    }
 
-type PromptFunction = [Module] 
+type PromptFunction = [Module]
                    -> Int
-                   -> IO String 
+                   -> IO String
 
 data GHCiOption
         = ShowTiming            -- show time/allocs after evaluation

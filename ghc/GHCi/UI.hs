@@ -332,7 +332,7 @@ defFullHelpText =
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
   "   :set prompt2 <prompt>       set the continuation prompt used in GHCi\n" ++
   "   :set prompt-function <expr> set the function\n" ++
-  "   :set prompt2-function <expr>set the function\n" ++
+  "   :set prompt-function2 <expr>set the function\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -379,7 +379,7 @@ findEditor = do
 --default_progname, default_prompt, default_prompt2, default_stop :: String
 default_progname, default_stop :: String
 default_prompt, default_prompt2 :: PromptFunction
-default_prompt mods num = return $ (show num) ++ "-" ++ moduleStringList ++  "> " 
+default_prompt mods num = return $ (show num) ++ "-" ++ moduleStringList ++  "> "
   where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
 default_prompt2 mods num = return $ (show num) ++ "-" ++ moduleStringList ++ "| "
   where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
@@ -737,7 +737,7 @@ mkPrompt = do
         deflt_prompt = dots <> context_bit <> modules_bit
         line_no = 1 + line_number st
         ms_mod_list = map GHC.ms_mod mods
-     
+
   promptString <- liftIO $ (prompt st) ms_mod_list line_no
 
   let
@@ -745,7 +745,7 @@ mkPrompt = do
         f ('%':'n':xs) = ppr line_no <> f xs
         f (x:xs) = char x <> f xs
         f [] = empty
-        
+
         promptDoc = dots <> context_bit <> (f promptString)
 
 
@@ -2305,7 +2305,7 @@ setCmd str
         setPromptFunc setPrompt $ dropWhile isSpace rest
     Right ("prompt",          rest) ->
         setPromptString setPrompt (dropWhile isSpace rest) "syntax: :set prompt <string>"
-    Right ("prompt2-function", rest) ->
+    Right ("prompt-function2", rest) ->
         setPromptFunc setPrompt2 $ dropWhile isSpace rest
     Right ("prompt2",         rest) ->
         setPromptString setPrompt2 (dropWhile isSpace rest) "syntax: :set prompt2 <string>"
@@ -2321,7 +2321,7 @@ setPromptFunc f s = do
     -- We explicitly annotate the type of the expression to ensure
     -- that unsafeCoerce# is passed the exact type necessary rather
     -- than a more general one
-    let exprStr = "(" ++ s ++ ") :: [Module] -> Int -> IO String"
+    let exprStr = "(" ++ s ++ ") :: [PModule] -> Int -> IO String"
     (HValue funValue) <- GHC.compileExpr exprStr
     f (unsafeCoerce funValue)
 
@@ -2543,7 +2543,7 @@ unsetOptions str
            , ("prompt" , setPrompt default_prompt)
            , ("prompt2", setPrompt2 default_prompt2)
            , ("prompt", setPrompt default_prompt)
-           , ("prompt2", setPrompt2 default_prompt2) 
+           , ("prompt2", setPrompt2 default_prompt2)
            , ("editor" , liftIO findEditor >>= setEditor)
            , ("stop"   , setStop default_stop)
            ]
