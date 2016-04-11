@@ -96,6 +96,8 @@ import Data.List ( find, group, intercalate, intersperse, isPrefixOf, nub,
                    partition, sort, sortBy )
 import Data.Maybe
 import qualified Data.Map as M
+import Data.Time.Clock ( getCurrentTime )
+import Data.Time.Format ( formatTime, defaultTimeLocale )
 
 import Exception hiding (catch)
 import Foreign
@@ -117,6 +119,7 @@ import Unsafe.Coerce
 
 #ifndef mingw32_HOST_OS
 import System.Posix hiding ( getEnv )
+import System.Posix.User (getLoginName)
 #else
 import qualified System.Win32
 #endif
@@ -331,8 +334,8 @@ defFullHelpText =
   "   :set prog <progname>        set the value returned by System.getProgName\n" ++
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
   "   :set prompt2 <prompt>       set the continuation prompt used in GHCi\n" ++
-  "   :set prompt-function <expr> set the function\n" ++
-  "   :set prompt-function2 <expr>set the function\n" ++
+  "   :set prompt-function <expr> set the function to handle prompt\n" ++
+  "   :set prompt-function2 <expr>set the function to handle continuation prompt\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -379,8 +382,9 @@ findEditor = do
 --default_progname, default_prompt, default_prompt2, default_stop :: String
 default_progname, default_stop :: String
 default_prompt, default_prompt2 :: PromptFunction
-default_prompt mods num = return $ (show num) ++ "-" ++ moduleStringList ++  "> "
-  where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
+--default_prompt mods num = return $ (show num) ++ "-" ++ moduleStringList ++  "> "
+--  where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
+default_prompt _ _ = return "%d> "
 default_prompt2 mods num = return $ (show num) ++ "-" ++ moduleStringList ++ "| "
   where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
 default_progname = "<interactive>"
@@ -701,6 +705,18 @@ fileLoop hdl = do
            incrementLineNo
            return (Just l')
 
+
+getUserName :: IO String
+getUserName = do
+#if mingw32_HOST_OS
+    getEnv "USERNAME"
+    `catchIO` \e -> do
+        putStrLn $ show e
+        return ""
+#else
+    getLoginName
+#endif
+
 mkPrompt :: GHCi String
 mkPrompt = do
   st <- getGHCiState
@@ -734,33 +750,90 @@ mkPrompt = do
         myIdeclName d | Just m <- ideclAs d = m
                       | otherwise           = unLoc (ideclName d)
 
-        deflt_prompt = dots <> context_bit <> modules_bit
-        line_no = 1 + line_number st
+        mod_list = dots <> context_bit <> modules_bit
+        line = 1 + line_number st
         ms_mod_list = map GHC.ms_mod mods
 
-  promptString <- liftIO $ (prompt st) ms_mod_list line_no
+  promptString <- liftIO $ (prompt st) ms_mod_list line
 
-  let
-        f ('%':'s':xs) = deflt_prompt <> f xs
-        f ('%':'n':xs) = ppr line_no <> f xs
-        f (x:xs) = char x <> f xs
-        f [] = empty
+  let   formatCurrentTime :: String -> IO String
+        formatCurrentTime form = 
+            getCurrentTime >>= return . (formatTime defaultTimeLocale form)
 
-        promptDoc = dots <> context_bit <> (f promptString)
 
+        f :: String -> IO SDoc 
+        f ('%':'s':xs) = do 
+            rest <- f xs
+            return $ mod_list <> rest 
+        f ('%':'n':xs) = do 
+            rest <- f xs
+            return $ ppr line <> rest 
+        f ('%':'d':xs) = do
+            time <- formatCurrentTime "%a %b %d" 
+            rest <- f xs
+            return $ (text time) <> rest
+        f ('%':'h':xs) = do
+            user_name <- getUserName
+            rest <- f xs            
+            return $ (text user_name) <> rest
+        f ('%':'H':xs) = do
+            user_name <- liftM (takeWhile (/='.')) getUserName
+            rest <- f xs
+            return $ (text user_name) <> rest
+        f ('%':'t':xs) = do
+            time <- formatCurrentTime "%H:%M:%S"
+            rest <- f xs
+            return $ (text time) <> rest
+        f ('%':'T':xs) = do
+            time <- formatCurrentTime "%I:%M:%S"
+            rest <- f xs
+            return $ (text time) <> rest
+        f ('%':'@':xs) = do
+            time <- formatCurrentTime "%I:%M %P"
+            rest <- f xs
+            return $ (text time) <> rest
+        f ('%':'w':xs) = do
+            direct <- getCurrentDirectory
+            rest <- f xs
+            return $ (text direct) <> rest
+        f ('%':'c':'a':'l':'l':xs) = do
+            let throw_first :: String -> String
+                throw_first "" = ""
+                throw_first (x:xs) = xs
+            let opened = throw_first $ dropWhile (/='(') xs
+            let cmd = takeWhile (/=')') opened
+            respond <- 
+                case cmd of
+                    "" -> do
+                        putStrLn $ 
+                            "incorrect call syntax: " ++ 
+                            "should be %call(some command and arguments)"
+                        return ""
+                    _ -> do
+                        let list_words = words cmd
+                        (code, out, err) <- 
+                            readProcessWithExitCode 
+                            (head list_words) (tail list_words) "" 
+                            `catchIO` \e -> return (ExitFailure 1, "", show e)
+                        case code of
+                            ExitSuccess -> return out
+                            _ -> do
+                                putStrLn err
+                                return ""
+            let after = throw_first $ dropWhile (/=')') opened
+            rest <- f after
+            return $ (text respond) <> rest
+        f (x:xs) = do 
+            rest <- f xs
+            return $ char x <> rest
+        f "" = return empty
+
+  prom <- liftIO $ f promptString
+
+  let 
+        promptDoc = dots <> context_bit <> prom
 
   return (showSDoc dflags promptDoc)
-
-        -- f ('%':'l':xs) = ppr (1 + line_number st) <> f xs
-        -- f ('%':'s':xs) = deflt_prompt <> f xs
-        -- f ('%':'%':xs) = char '%' <> f xs
-        -- f (x:xs) = char x <> f xs
-        -- f [] = empty
-
-  -- dflags <- getDynFlags
-  -- return (showSDoc dflags (text defFunc))
-  -- return (showSDoc dflags (f (prompt st)))
-
 
 queryQueue :: GHCi (Maybe String)
 queryQueue = do

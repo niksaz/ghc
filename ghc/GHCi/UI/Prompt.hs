@@ -1,5 +1,6 @@
 module GHCi.UI.Prompt (
-  PModule
+  PModule,
+  PFunction
 ) where
 
 data PModule = Module {
