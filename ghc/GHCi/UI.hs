@@ -336,7 +336,8 @@ defFullHelpText =
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
   "   :set prompt2 <prompt>       set the continuation prompt used in GHCi\n" ++
   "   :set prompt-function <expr> set the function to handle prompt\n" ++
-  "   :set prompt-function2 <expr>set the function to handle continuation prompt\n" ++
+  "   :set prompt-function2 <expr>" ++
+                        "set the function to handle continuation prompt\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -2371,17 +2372,16 @@ setCmd str
         case toArgs rest of
             Right [prog] -> setProg prog
             _ -> liftIO (hPutStrLn stderr "syntax: :set prog <progname>")
-    --Right ("prompt",  rest) -> setPrompt  $ dropWhile isSpace rest
-    --Right ("prompt2", rest) -> setPrompt2 $ dropWhile isSpace rest
     Right ("prompt-function",  rest) ->
         setPromptFunc setPrompt $ dropWhile isSpace rest
     Right ("prompt",          rest) ->
-        setPromptString setPrompt (dropWhile isSpace rest) "syntax: :set prompt <string>"
+        setPromptString setPrompt (dropWhile isSpace rest)
+                        "syntax: :set prompt <string>"
     Right ("prompt-function2", rest) ->
         setPromptFunc setPrompt2 $ dropWhile isSpace rest
     Right ("prompt2",         rest) ->
-        setPromptString setPrompt2 (dropWhile isSpace rest) "syntax: :set prompt2 <string>"
-
+        setPromptString setPrompt2 (dropWhile isSpace rest)
+                        "syntax: :set prompt2 <string>"
     Right ("editor",  rest) -> setEditor  $ dropWhile isSpace rest
     Right ("stop",    rest) -> setStop    $ dropWhile isSpace rest
     _ -> case toArgs str of
@@ -2484,49 +2484,23 @@ setStop str@(c:_) | isDigit c
        setGHCiState st{ breaks = new_breaks }
 setStop cmd = modifyGHCiState (\st -> st { stop = cmd })
 
---setPrompt :: String -> GHCi ()
---setPrompt = setPrompt_ f err
---  where
---    f v st = st { prompt = v }
---    err st = "syntax: :set prompt <prompt>, currently \"" ++ prompt st ++ "\""
 setPrompt :: PromptFunction -> GHCi ()
 setPrompt v = modifyGHCiState (\st -> st {prompt = v})
-
--- setPromptFunc :: String -> GHCi ()
-
---setPrompt2 :: String -> GHCi ()
---setPrompt2 = setPrompt_ f err
---  where
---    f v st = st { prompt2 = v }
---    err st = "syntax: :set prompt2 <prompt>, currently \"" ++ prompt2 st ++ "\""
 
 setPrompt2 :: PromptFunction -> GHCi ()
 setPrompt2 v = modifyGHCiState (\st -> st {prompt2 = v})
 
---setPrompt_ :: (String -> GHCiState -> GHCiState) -> (GHCiState -> String) -> String -> GHCi ()
---setPrompt_ f err value = do
---  st <- getGHCiState
---  if null value
---      then liftIO $ hPutStrLn stderr $ err st
---      else case value of
---           '\"' : _ -> case reads value of
---                       [(value', xs)] | all isSpace xs ->
---                           setGHCiState $ f value' st
---                       _ ->
---                           liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
---           _ -> setGHCiState $ f value st
-
 setPromptString :: (PromptFunction -> GHCi ()) -> String -> String -> GHCi ()
 setPromptString f value err = do
-    if null value
-        then liftIO $ hPutStrLn stderr $ err
-        else case value of
-            '\"' : _ -> case reads value of
-                        [(value', xs)] | all isSpace xs ->
-                            f (\_ _ -> return value')
-                        _ ->
-                          liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
-            _ -> f (\_ _ -> return value)
+  if null value
+    then liftIO $ hPutStrLn stderr $ err
+    else case value of
+           ('\"':_) ->
+             case reads value of
+               [(value', xs)] | all isSpace xs -> f (\_ _ -> return value')
+               _ -> liftIO $ hPutStrLn stderr
+                             "Can't parse prompt string. Use Haskell syntax."
+           _ -> f (\_ _ -> return value)
 
 setOptions wds =
    do -- first, deal with the GHCi opts (+s, +t, etc.)
@@ -3006,7 +2980,8 @@ listHomeModules w = do
 
 completeSetOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = "args":"prog":"prompt":"prompt2":"prompt-function":"prompt-function2":"editor":"stop":flagList
+    where opts = "args":"prog":"prompt":"prompt2":"prompt-function":
+                 "prompt-function2":"editor":"stop":flagList
           flagList = map head $ group $ sort allNonDeprecatedFlags
 
 completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
