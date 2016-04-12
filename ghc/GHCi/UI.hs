@@ -98,6 +98,7 @@ import Data.Maybe
 import qualified Data.Map as M
 import Data.Time.Clock ( getCurrentTime )
 import Data.Time.Format ( formatTime, defaultTimeLocale )
+import Data.Version ( showVersion )
 
 import Exception hiding (catch)
 import Foreign
@@ -107,6 +108,7 @@ import System.Directory
 import System.Environment
 import System.Exit ( exitWith, ExitCode(..) )
 import System.FilePath
+import System.Info
 import System.IO
 import System.IO.Error
 import System.IO.Unsafe ( unsafePerformIO )
@@ -119,7 +121,6 @@ import Unsafe.Coerce
 
 #ifndef mingw32_HOST_OS
 import System.Posix hiding ( getEnv )
-import System.Posix.User (getLoginName)
 #else
 import qualified System.Win32
 #endif
@@ -379,18 +380,13 @@ findEditor = do
         return ""
 #endif
 
---default_progname, default_prompt, default_prompt2, default_stop :: String
 default_progname, default_stop :: String
-default_prompt, default_prompt2 :: PromptFunction
---default_prompt mods num = return $ (show num) ++ "-" ++ moduleStringList ++  "> "
---  where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
-default_prompt _ _ = return "%d> "
-default_prompt2 mods num = return $ (show num) ++ "-" ++ moduleStringList ++ "| "
-  where moduleStringList = (intercalate ", " $ map (moduleNameString . moduleName) mods)
 default_progname = "<interactive>"
---default_prompt = "number of loaded modules: %n> "
---default_prompt2 = "number of loaded modules: %n| "
 default_stop = ""
+
+default_prompt, default_prompt2 :: PromptFunction
+default_prompt _ _ = return "%s> "
+default_prompt2 _ _ = return "%s| "
 
 default_args :: [String]
 default_args = []
@@ -452,8 +448,6 @@ interactiveUI config srcs maybe_exprs = do
         GHCiState{ progname           = default_progname,
                    args               = default_args,
                    evalWrapper        = eval_wrapper,
-  --                 prompt             = defPrompt config,
-    --               prompt2            = defPrompt2 config,
                    prompt             = default_prompt,
                    prompt2            = default_prompt2,
                    stop               = default_stop,
@@ -705,24 +699,26 @@ fileLoop hdl = do
            incrementLineNo
            return (Just l')
 
+formatCurrentTime :: String -> IO String
+formatCurrentTime format = 
+  getCurrentTime >>= return . (formatTime defaultTimeLocale format)
 
 getUserName :: IO String
 getUserName = do
-#if mingw32_HOST_OS
-    getEnv "USERNAME"
+#ifdef mingw32_HOST_OS
+  getEnv "USERNAME"
     `catchIO` \e -> do
-        putStrLn $ show e
-        return ""
+      putStrLn $ show e
+      return ""
 #else
-    getLoginName
+  getLoginName
 #endif
 
-mkPrompt :: GHCi String
-mkPrompt = do
+getInfoForPrompt :: GHCi (SDoc, SDoc, SDoc, [Module], Int) 
+getInfoForPrompt = do
   st <- getGHCiState
   imports <- GHC.getContext
   resumes <- GHC.getResumeContext
-  dflags <- getDynFlags
   mods <- getLoadedModules
 
   context_bit <-
@@ -737,6 +733,7 @@ mkPrompt = do
                         pan <- GHC.getHistorySpan hist
                         return (brackets (ppr (negate ix) <> char ':'
                                           <+> ppr pan) <> space)
+    
   let
         dots | _:rs <- resumes, not (null rs) = text "... "
              | otherwise = empty
@@ -750,64 +747,65 @@ mkPrompt = do
         myIdeclName d | Just m <- ideclAs d = m
                       | otherwise           = unLoc (ideclName d)
 
-        mod_list = dots <> context_bit <> modules_bit
+        modules_list = dots <> context_bit <> modules_bit
         line = 1 + line_number st
-        ms_mod_list = map GHC.ms_mod mods
+        ms_modules_list = map GHC.ms_mod mods
 
-  promptString <- liftIO $ (prompt st) ms_mod_list line
+  return (dots, context_bit, modules_list, ms_modules_list, line) 
 
-  let   formatCurrentTime :: String -> IO String
-        formatCurrentTime form = 
-            getCurrentTime >>= return . (formatTime defaultTimeLocale form)
+mkPrompt :: GHCi String
+mkPrompt = do
+  st <- getGHCiState
+  dflags <- getDynFlags
+  (dots, context_bit, modules_list, ms_modules_list, line) <- getInfoForPrompt
 
-
-        f :: String -> IO SDoc 
-        f ('%':'s':xs) = do 
-            rest <- f xs
-            return $ mod_list <> rest 
-        f ('%':'n':xs) = do 
-            rest <- f xs
-            return $ ppr line <> rest 
-        f ('%':'d':xs) = do
-            time <- formatCurrentTime "%a %b %d" 
-            rest <- f xs
-            return $ (text time) <> rest
-        f ('%':'h':xs) = do
-            user_name <- getUserName
-            rest <- f xs            
-            return $ (text user_name) <> rest
-        f ('%':'H':xs) = do
-            user_name <- liftM (takeWhile (/='.')) getUserName
-            rest <- f xs
-            return $ (text user_name) <> rest
-        f ('%':'t':xs) = do
-            time <- formatCurrentTime "%H:%M:%S"
-            rest <- f xs
-            return $ (text time) <> rest
-        f ('%':'T':xs) = do
-            time <- formatCurrentTime "%I:%M:%S"
-            rest <- f xs
-            return $ (text time) <> rest
-        f ('%':'@':xs) = do
-            time <- formatCurrentTime "%I:%M %P"
-            rest <- f xs
-            return $ (text time) <> rest
-        f ('%':'w':xs) = do
-            direct <- getCurrentDirectory
-            rest <- f xs
-            return $ (text direct) <> rest
-        f ('%':'c':'a':'l':'l':xs) = do
-            let throw_first :: String -> String
-                throw_first "" = ""
-                throw_first (x:xs) = xs
-            let opened = throw_first $ dropWhile (/='(') xs
+  raw_prompt_string <- liftIO $ (prompt st) ms_modules_list line 
+  
+  let    
+        -- function to substitute escape sequences
+        processString :: String -> IO SDoc 
+        processString ('\\':'%':xs) =
+            liftM ((char '%') <>) (processString xs)
+        processString ('%':'s':xs) =
+            liftM2 (<>) (return modules_list) (processString xs) 
+        processString ('%':'n':xs) =
+            liftM2 (<>) (return $ ppr line) (processString xs) 
+        processString ('%':'d':xs) = 
+            liftM2 (<>) (liftM text formatted_time) (processString xs)
+            where formatted_time = formatCurrentTime "%a %b %d"
+        processString ('%':'t':xs) = 
+            liftM2 (<>) (liftM text formatted_time) (processString xs)
+            where formatted_time = formatCurrentTime "%H:%M:%S"
+        processString ('%':'T':xs) = do
+            liftM2 (<>) (liftM text formatted_time) (processString xs)
+            where formatted_time = formatCurrentTime "%I:%M:%S"
+        processString ('%':'@':xs) = do
+            liftM2 (<>) (liftM text formatted_time) (processString xs)
+            where formatted_time = formatCurrentTime "%I:%M %P"
+        processString ('%':'u':xs) = 
+            liftM2 (<>) (liftM text user_name) (processString xs)
+            where user_name = getUserName
+        processString ('%':'w':xs) = 
+            liftM2 (<>) (liftM text current_directory) (processString xs)
+            where current_directory = getCurrentDirectory
+        processString ('%':'o':xs) =
+            liftM ((text os) <>) (processString xs)
+        processString ('%':'a':xs) = 
+            liftM ((text arch) <>) (processString xs) 
+        processString ('%':'N':xs) =
+            liftM ((text compilerName) <>) (processString xs)
+        processString ('%':'V':xs) =
+            liftM ((text $ showVersion compilerVersion) <>) (processString xs)
+        processString ('%':'c':'a':'l':'l':xs) = do
+            let opened = tail' $ dropWhile (/='(') xs
             let cmd = takeWhile (/=')') opened
             respond <- 
                 case cmd of
                     "" -> do
                         putStrLn $ 
                             "incorrect call syntax: " ++ 
-                            "should be %call(some command and arguments)"
+                            "should be %call(some command and arguments)\n" ++
+                            "currently: " ++ raw_prompt_string
                         return ""
                     _ -> do
                         let list_words = words cmd
@@ -820,20 +818,21 @@ mkPrompt = do
                             _ -> do
                                 putStrLn err
                                 return ""
-            let after = throw_first $ dropWhile (/=')') opened
-            rest <- f after
-            return $ (text respond) <> rest
-        f (x:xs) = do 
-            rest <- f xs
-            return $ char x <> rest
-        f "" = return empty
+            let after = tail' $ dropWhile (/=')') opened
+            liftM ((text respond) <>) (processString after)
+            where tail' :: String -> String
+                  tail' "" = ""
+                  tail' (_:xs) = xs
+        processString (x:xs) = 
+            liftM (char x <>) (processString xs) 
+        processString "" = 
+            return empty
 
-  prom <- liftIO $ f promptString
+  processed_prompt_string <- liftIO $ processString raw_prompt_string
 
-  let 
-        promptDoc = dots <> context_bit <> prom
+  let prompt_doc = dots <> context_bit <> processed_prompt_string
 
-  return (showSDoc dflags promptDoc)
+  return (showSDoc dflags prompt_doc)
 
 queryQueue :: GHCi (Maybe String)
 queryQueue = do
@@ -2680,6 +2679,10 @@ showCmd "-a" = showOptions True
 showCmd str = do
     st <- getGHCiState
     dflags <- getDynFlags
+    (_, _, _, ms_modules_list, line) <- getInfoForPrompt
+
+    raw_prompt_string <- liftIO $ (prompt st) ms_modules_list line 
+    raw_prompt_string2 <- liftIO $ (prompt2 st) ms_modules_list line
 
     let lookupCmd :: String -> Maybe (GHCi ())
         lookupCmd name = lookup name $ map (\(_,b,c) -> (b,c)) cmds
@@ -2694,8 +2697,8 @@ showCmd str = do
         cmds =
             [ action "args"       $ liftIO $ putStrLn (show (GhciMonad.args st))
             , action "prog"       $ liftIO $ putStrLn (show (progname st))
-            --, action "prompt"     $ liftIO $ putStrLn (show (prompt st))
-            --, action "prompt2"    $ liftIO $ putStrLn (show (prompt2 st))
+            , action "prompt"     $ liftIO $ putStrLn raw_prompt_string
+            , action "prompt2"    $ liftIO $ putStrLn raw_prompt_string2
             , action "editor"     $ liftIO $ putStrLn (show (editor st))
             , action "stop"       $ liftIO $ putStrLn (show (stop st))
             , action "imports"    $ showImports
