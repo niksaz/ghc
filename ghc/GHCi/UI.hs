@@ -136,7 +136,7 @@ data GhciSettings = GhciSettings {
         shortHelpText     :: String,
         fullHelpText      :: String,
         defPrompt         :: PromptFunction,
-        defPrompt2        :: PromptFunction
+        defPromptCont     :: PromptFunction
     }
 
 defaultGhciSettings :: GhciSettings
@@ -145,7 +145,7 @@ defaultGhciSettings =
         availableCommands = ghciCommands,
         shortHelpText     = defShortHelpText,
         defPrompt         = default_prompt,
-        defPrompt2        = default_prompt2,
+        defPromptCont     = default_prompt_cont,
         fullHelpText      = defFullHelpText
     }
 
@@ -334,10 +334,10 @@ defFullHelpText =
   "   :set args <arg> ...         set the arguments returned by System.getArgs\n" ++
   "   :set prog <progname>        set the value returned by System.getProgName\n" ++
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
-  "   :set prompt2 <prompt>       set the continuation prompt used in GHCi\n" ++
-  "   :set prompt-function <expr> set the function to handle prompt\n" ++
-  "   :set prompt-function2 <expr>" ++
-                        "set the function to handle continuation prompt\n" ++
+  "   :set prompt-cont <prompt>   set the continuation prompt used in GHCi\n" ++
+  "   :set prompt-function <expr> set the function to handle the prompt\n" ++
+  "   :set prompt-cont-function <expr>" ++
+                            "set the function to handle the continuation prompt\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -366,7 +366,7 @@ defFullHelpText =
   "   :show paths                 show the currently active search paths\n" ++
   "   :show language              show the currently active language flags\n" ++
   "   :show <setting>             show value of <setting>, which is one of\n" ++
-  "                                  [args, prog, prompt, editor, stop]\n" ++
+  "                                  [args, prog, editor, stop]\n" ++
   "   :showi language             show language flags for interactive evaluation\n" ++
   "\n"
 
@@ -385,9 +385,9 @@ default_progname, default_stop :: String
 default_progname = "<interactive>"
 default_stop = ""
 
-default_prompt, default_prompt2 :: PromptFunction
-default_prompt _ _ = return "%s> "
-default_prompt2 _ _ = return "%s| "
+default_prompt, default_prompt_cont :: PromptFunction
+default_prompt _ _      = generatePromptFunctionFromString "%s> "
+default_prompt_cont _ _ = generatePromptFunctionFromString "%s| "
 
 default_args :: [String]
 default_args = []
@@ -450,7 +450,7 @@ interactiveUI config srcs maybe_exprs = do
                    args               = default_args,
                    evalWrapper        = eval_wrapper,
                    prompt             = default_prompt,
-                   prompt2            = default_prompt2,
+                   prompt_cont        = default_prompt_cont,
                    stop               = default_stop,
                    editor             = default_editor,
                    options            = [],
@@ -715,12 +715,11 @@ getUserName = do
   getLoginName
 #endif
 
-getInfoForPrompt :: GHCi (SDoc, SDoc, SDoc, [Module], Int)
+getInfoForPrompt :: GHCi (SDoc, [String], Int)
 getInfoForPrompt = do
   st <- getGHCiState
   imports <- GHC.getContext
   resumes <- GHC.getResumeContext
-  mods <- getLoadedModules
 
   context_bit <-
         case resumes of
@@ -740,55 +739,52 @@ getInfoForPrompt = do
              | otherwise = empty
 
         rev_imports = reverse imports -- rightmost are the most recent
-        modules_bit =
-             hsep [ char '*' <> ppr m | IIModule m <- rev_imports ] <+>
-             hsep (map ppr [ myIdeclName d | IIDecl d <- rev_imports ])
-
-         --  use the 'as' name if there is one
+        
         myIdeclName d | Just m <- ideclAs d = m
                       | otherwise           = unLoc (ideclName d)
-
-        modules_list = dots <> context_bit <> modules_bit
+    
+        modules_names = 
+             ['*':(moduleNameString m) | IIModule m <- rev_imports] ++
+             [moduleNameString (myIdeclName d) | IIDecl d <- rev_imports]    
         line = 1 + line_number st
-        ms_modules_list = map GHC.ms_mod mods
 
-  return (dots, context_bit, modules_list, ms_modules_list, line)
+  return (dots <> context_bit, modules_names, line)
 
-mkPrompt :: GHCi String
-mkPrompt = do
-  st <- getGHCiState
-  dflags <- getDynFlags
-  (dots, context_bit, modules_list, ms_modules_list, line) <- getInfoForPrompt
-
-  raw_prompt_string <- liftIO $ (prompt st) ms_modules_list line
+generatePromptFunctionFromString :: String -> GHCi SDoc
+generatePromptFunctionFromString promptS = do
+  (context, modules_names, line) <- getInfoForPrompt
 
   let
-        -- function to substitute escape sequences
-        processString :: String -> IO SDoc
-        processString ('\\':'%':xs) =
+        processString :: String -> GHCi SDoc
+        processString ('%':'%':xs) =
             liftM ((char '%') <>) (processString xs)
         processString ('%':'s':xs) =
             liftM2 (<>) (return modules_list) (processString xs)
-        processString ('%':'n':xs) =
+            where modules_list = context <> modules_bit
+                  modules_bit = hsep $ map text modules_names
+        processString ('%':'l':xs) =
             liftM2 (<>) (return $ ppr line) (processString xs)
         processString ('%':'d':xs) =
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = formatCurrentTime "%a %b %d"
+            where formatted_time = liftIO $ formatCurrentTime "%a %b %d"
         processString ('%':'t':xs) =
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = formatCurrentTime "%H:%M:%S"
+            where formatted_time = liftIO $ formatCurrentTime "%H:%M:%S"
         processString ('%':'T':xs) = do
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = formatCurrentTime "%I:%M:%S"
+            where formatted_time = liftIO $ formatCurrentTime "%I:%M:%S"
         processString ('%':'@':xs) = do
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = formatCurrentTime "%I:%M %P"
+            where formatted_time = liftIO $ formatCurrentTime "%I:%M %P"
+        processString ('%':'A':xs) = do
+            liftM2 (<>) (liftM text formatted_time) (processString xs)
+            where formatted_time = liftIO $ formatCurrentTime "%H:%M"
         processString ('%':'u':xs) =
             liftM2 (<>) (liftM text user_name) (processString xs)
-            where user_name = getUserName
+            where user_name = liftIO $ getUserName
         processString ('%':'w':xs) =
             liftM2 (<>) (liftM text current_directory) (processString xs)
-            where current_directory = getCurrentDirectory
+            where current_directory = liftIO $ getCurrentDirectory
         processString ('%':'o':xs) =
             liftM ((text os) <>) (processString xs)
         processString ('%':'a':xs) =
@@ -800,13 +796,13 @@ mkPrompt = do
         processString ('%':'c':'a':'l':'l':xs) = do
             let opened = tail' $ dropWhile (/='(') xs
             let cmd = takeWhile (/=')') opened
-            respond <-
+            respond <- liftIO $
                 case cmd of
                     "" -> do
                         putStrLn $
                             "incorrect call syntax: " ++
                             "should be %call(some command and arguments)\n" ++
-                            "currently: " ++ raw_prompt_string
+                            "currently: " ++ promptS
                         return ""
                     _ -> do
                         let list_words = words cmd
@@ -827,11 +823,17 @@ mkPrompt = do
         processString (x:xs) =
             liftM (char x <>) (processString xs)
         processString "" =
-            return empty
+            return empty 
+  processString promptS
 
-  processed_prompt_string <- liftIO $ processString raw_prompt_string
+mkPrompt :: GHCi String
+mkPrompt = do
+  st <- getGHCiState
+  dflags <- getDynFlags
+  (context, modules_names, line) <- getInfoForPrompt
 
-  let prompt_doc = dots <> context_bit <> processed_prompt_string
+  prompt_string <- (prompt st) modules_names line
+  let prompt_doc = context <> prompt_string
 
   return (showSDoc dflags prompt_doc)
 
@@ -914,7 +916,7 @@ runOneCommand eh gCmd = do
     multiLineCmd q = do
       st <- getGHCiState
       let p = prompt st
-      setGHCiState st{ prompt = prompt2 st }
+      setGHCiState st{ prompt = prompt_cont st }
       mb_cmd <- collectCommand q "" `GHC.gfinally`
                 modifyGHCiState (\st' -> st' { prompt = p })
       return mb_cmd
@@ -1007,7 +1009,7 @@ checkInputForLayout stmt getStmt = do
      _other              -> do
        st1 <- getGHCiState
        let p = prompt st1
-       setGHCiState st1{ prompt = prompt2 st1 }
+       setGHCiState st1{ prompt = prompt_cont st1 }
        mb_stmt <- ghciHandle (\ex -> case fromException ex of
                             Just UserInterrupt -> return Nothing
                             _ -> case fromException ex of
@@ -2372,30 +2374,23 @@ setCmd str
         case toArgs rest of
             Right [prog] -> setProg prog
             _ -> liftIO (hPutStrLn stderr "syntax: :set prog <progname>")
+
+    Right ("prompt",           rest) ->
+        setPromptString setPrompt (dropWhile isSpace rest)
+                        "syntax: set prompt <string>"
     Right ("prompt-function",  rest) ->
         setPromptFunc setPrompt $ dropWhile isSpace rest
-    Right ("prompt",          rest) ->
-        setPromptString setPrompt (dropWhile isSpace rest)
-                        "syntax: :set prompt <string>"
-    Right ("prompt-function2", rest) ->
-        setPromptFunc setPrompt2 $ dropWhile isSpace rest
-    Right ("prompt2",         rest) ->
-        setPromptString setPrompt2 (dropWhile isSpace rest)
-                        "syntax: :set prompt2 <string>"
+    Right ("prompt-cont",          rest) ->
+        setPromptString setPromptCont (dropWhile isSpace rest)
+                        "syntax: :set prompt-cont <string>"
+    Right ("prompt-cont-function", rest) ->
+        setPromptFunc setPromptCont $ dropWhile isSpace rest
+
     Right ("editor",  rest) -> setEditor  $ dropWhile isSpace rest
     Right ("stop",    rest) -> setStop    $ dropWhile isSpace rest
     _ -> case toArgs str of
          Left err -> liftIO (hPutStrLn stderr err)
          Right wds -> setOptions wds
-
-setPromptFunc :: (PromptFunction -> GHCi ()) -> String -> GHCi ()
-setPromptFunc f s = do
-    -- We explicitly annotate the type of the expression to ensure
-    -- that unsafeCoerce# is passed the exact type necessary rather
-    -- than a more general one
-    let exprStr = "(" ++ s ++ ") :: [PModule] -> Int -> IO String"
-    (HValue funValue) <- GHC.compileExpr exprStr
-    f (unsafeCoerce funValue)
 
 setiCmd :: String -> GHCi ()
 setiCmd ""   = GHC.getInteractiveDynFlags >>= liftIO . showDynFlags False
@@ -2487,8 +2482,20 @@ setStop cmd = modifyGHCiState (\st -> st { stop = cmd })
 setPrompt :: PromptFunction -> GHCi ()
 setPrompt v = modifyGHCiState (\st -> st {prompt = v})
 
-setPrompt2 :: PromptFunction -> GHCi ()
-setPrompt2 v = modifyGHCiState (\st -> st {prompt2 = v})
+setPromptCont :: PromptFunction -> GHCi ()
+setPromptCont v = modifyGHCiState (\st -> st {prompt_cont = v})
+
+setPromptFunc :: (PromptFunction -> GHCi ()) -> String -> GHCi ()
+setPromptFunc f s = do
+    -- We explicitly annotate the type of the expression to ensure
+    -- that unsafeCoerce# is passed the exact type necessary rather
+    -- than a more general one
+    let exprStr = "(" ++ s ++ ") :: [String] -> Int -> IO String"
+    (HValue funValue) <- GHC.compileExpr exprStr
+    f (convertToPromptFunction $ unsafeCoerce funValue)
+    where
+      convertToPromptFunction :: ([String] -> Int -> IO String) -> PromptFunction
+      convertToPromptFunction func = (\mods line -> liftIO $ liftM text (func mods line))
 
 setPromptString :: (PromptFunction -> GHCi ()) -> String -> String -> GHCi ()
 setPromptString f value err = do
@@ -2497,10 +2504,12 @@ setPromptString f value err = do
     else case value of
            ('\"':_) ->
              case reads value of
-               [(value', xs)] | all isSpace xs -> f (\_ _ -> return value')
+               [(value', xs)] | all isSpace xs -> do 
+                 f (\_ _ -> generatePromptFunctionFromString value')
                _ -> liftIO $ hPutStrLn stderr
                              "Can't parse prompt string. Use Haskell syntax."
-           _ -> f (\_ _ -> return value)
+           _ -> do
+             f (\_ _ -> generatePromptFunctionFromString value)
 
 setOptions wds =
    do -- first, deal with the GHCi opts (+s, +t, etc.)
@@ -2586,10 +2595,8 @@ unsetOptions str
          defaulters =
            [ ("args"   , setArgs default_args)
            , ("prog"   , setProg default_progname)
-           , ("prompt" , setPrompt default_prompt)
-           , ("prompt2", setPrompt2 default_prompt2)
-           , ("prompt", setPrompt default_prompt)
-           , ("prompt2", setPrompt2 default_prompt2)
+           , ("prompt"     , setPrompt default_prompt)
+           , ("prompt-cont", setPromptCont default_prompt_cont)
            , ("editor" , liftIO findEditor >>= setEditor)
            , ("stop"   , setStop default_stop)
            ]
@@ -2653,10 +2660,6 @@ showCmd "-a" = showOptions True
 showCmd str = do
     st <- getGHCiState
     dflags <- getDynFlags
-    (_, _, _, ms_modules_list, line) <- getInfoForPrompt
-
-    raw_prompt_string <- liftIO $ (prompt st) ms_modules_list line
-    raw_prompt_string2 <- liftIO $ (prompt2 st) ms_modules_list line
 
     let lookupCmd :: String -> Maybe (GHCi ())
         lookupCmd name = lookup name $ map (\(_,b,c) -> (b,c)) cmds
@@ -2671,8 +2674,6 @@ showCmd str = do
         cmds =
             [ action "args"       $ liftIO $ putStrLn (show (GhciMonad.args st))
             , action "prog"       $ liftIO $ putStrLn (show (progname st))
-            , action "prompt"     $ liftIO $ putStrLn raw_prompt_string
-            , action "prompt2"    $ liftIO $ putStrLn raw_prompt_string2
             , action "editor"     $ liftIO $ putStrLn (show (editor st))
             , action "stop"       $ liftIO $ putStrLn (show (stop st))
             , action "imports"    $ showImports
@@ -2980,8 +2981,8 @@ listHomeModules w = do
 
 completeSetOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = "args":"prog":"prompt":"prompt2":"prompt-function":
-                 "prompt-function2":"editor":"stop":flagList
+    where opts = "args":"prog":"prompt":"prompt-cont":"prompt-function":
+                 "prompt-cont-function":"editor":"stop":flagList
           flagList = map head $ group $ sort allNonDeprecatedFlags
 
 completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
@@ -2990,7 +2991,7 @@ completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
 
 completeShowOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = ["args", "prog", "prompt", "prompt2", "editor", "stop",
+    where opts = ["args", "prog", "editor", "stop",
                      "modules", "bindings", "linker", "breaks",
                      "context", "packages", "paths", "language", "imports"]
 

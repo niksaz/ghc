@@ -67,9 +67,9 @@ data GHCiState = GHCiState
      {
         progname       :: String,
         args           :: [String],
-        evalWrapper    :: ForeignHValue, -- ^ of type @IO a -> IO a@
+        evalWrapper    :: ForeignHValue, -- ^ of type @IO a -> IO a@ 
         prompt         :: PromptFunction,
-        prompt2        :: PromptFunction,
+        prompt_cont    :: PromptFunction,
         editor         :: String,
         stop           :: String,
         options        :: [GHCiOption],
@@ -138,9 +138,9 @@ data Command
      -- ^ 'CompletionFunc' for arguments
    }
 
-type PromptFunction = [Module]
+type PromptFunction = [String]
                    -> Int
-                   -> IO String
+                   -> GHCi SDoc
 
 data GHCiOption
         = ShowTiming            -- show time/allocs after evaluation
