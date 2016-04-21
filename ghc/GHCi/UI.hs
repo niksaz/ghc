@@ -97,6 +97,7 @@ import Data.List ( find, group, intercalate, intersperse, isPrefixOf, nub,
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Time.Clock ( getCurrentTime )
+import Data.Time.LocalTime 
 import Data.Time.Format ( formatTime, defaultTimeLocale )
 import Data.Version ( showVersion )
 
@@ -702,7 +703,7 @@ fileLoop hdl = do
 
 formatCurrentTime :: String -> IO String
 formatCurrentTime format =
-  getCurrentTime >>= return . (formatTime defaultTimeLocale format)
+  getZonedTime >>= return . (formatTime defaultTimeLocale format)
 
 getUserName :: IO String
 getUserName = do
@@ -750,41 +751,64 @@ getInfoForPrompt = do
 
   return (dots <> context_bit, modules_names, line)
 
+checkPromptStringForErrors :: String -> Maybe String
+checkPromptStringForErrors ('%':'c':'a':'l':'l':xs) =  
+  case cmd of 
+    "" -> Just ("Incorrect %call syntax. " ++
+                "Should be %call(a command and arguments).")
+    _ -> checkPromptStringForErrors afterClosed
+  where 
+    cmd = takeWhile (/=')') afterOpen
+    afterOpen = tail' $ dropWhile (/='(') xs
+    afterClosed = tail' $ dropWhile (/=')') afterOpen
+    tail' :: String -> String
+    tail' "" = ""
+    tail' (_:xs) = xs
+checkPromptStringForErrors ('%':'%':xs) = checkPromptStringForErrors xs
+checkPromptStringForErrors (_:xs) = checkPromptStringForErrors xs
+checkPromptStringForErrors "" = Nothing
+
 generatePromptFunctionFromString :: String -> GHCi SDoc
 generatePromptFunctionFromString promptS = do
   (context, modules_names, line) <- getInfoForPrompt
 
   let
         processString :: String -> GHCi SDoc
-        processString ('%':'%':xs) =
-            liftM ((char '%') <>) (processString xs)
         processString ('%':'s':xs) =
             liftM2 (<>) (return modules_list) (processString xs)
-            where modules_list = context <> modules_bit
-                  modules_bit = hsep $ map text modules_names
+            where 
+              modules_list = context <> modules_bit
+              modules_bit = hsep $ map text modules_names
         processString ('%':'l':xs) =
             liftM2 (<>) (return $ ppr line) (processString xs)
         processString ('%':'d':xs) =
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = liftIO $ formatCurrentTime "%a %b %d"
+            where 
+              formatted_time = liftIO $ formatCurrentTime "%a %b %d"
         processString ('%':'t':xs) =
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = liftIO $ formatCurrentTime "%H:%M:%S"
+            where 
+              formatted_time = liftIO $ formatCurrentTime "%H:%M:%S"
         processString ('%':'T':xs) = do
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = liftIO $ formatCurrentTime "%I:%M:%S"
+            where 
+              formatted_time = liftIO $ formatCurrentTime "%I:%M:%S"
         processString ('%':'@':xs) = do
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = liftIO $ formatCurrentTime "%I:%M %P"
+            where 
+              formatted_time = liftIO $ formatCurrentTime "%I:%M %P"
         processString ('%':'A':xs) = do
             liftM2 (<>) (liftM text formatted_time) (processString xs)
-            where formatted_time = liftIO $ formatCurrentTime "%H:%M"
+            where 
+              formatted_time = liftIO $ formatCurrentTime "%H:%M"
         processString ('%':'u':xs) =
             liftM2 (<>) (liftM text user_name) (processString xs)
-            where user_name = liftIO $ getUserName
+            where 
+              user_name = liftIO $ getUserName
         processString ('%':'w':xs) =
             liftM2 (<>) (liftM text current_directory) (processString xs)
-            where current_directory = liftIO $ getCurrentDirectory
+            where 
+              current_directory = liftIO $ getCurrentDirectory
         processString ('%':'o':xs) =
             liftM ((text os) <>) (processString xs)
         processString ('%':'a':xs) =
@@ -794,32 +818,27 @@ generatePromptFunctionFromString promptS = do
         processString ('%':'V':xs) =
             liftM ((text $ showVersion compilerVersion) <>) (processString xs)
         processString ('%':'c':'a':'l':'l':xs) = do
-            let opened = tail' $ dropWhile (/='(') xs
-            let cmd = takeWhile (/=')') opened
-            respond <- liftIO $
-                case cmd of
-                    "" -> do
-                        putStrLn $
-                            "incorrect call syntax: " ++
-                            "should be %call(some command and arguments)\n" ++
-                            "currently: " ++ promptS
-                        return ""
+            respond <- liftIO $ do
+                (code, out, err) <- 
+                    readProcessWithExitCode 
+                    (head list_words) (tail list_words) ""
+                    `catchIO` \e -> return (ExitFailure 1, "", show e) 
+                case code of
+                    ExitSuccess -> return out
                     _ -> do
-                        let list_words = words cmd
-                        (code, out, err) <-
-                            readProcessWithExitCode
-                            (head list_words) (tail list_words) ""
-                            `catchIO` \e -> return (ExitFailure 1, "", show e)
-                        case code of
-                            ExitSuccess -> return out
-                            _ -> do
-                                putStrLn err
-                                return ""
-            let after = tail' $ dropWhile (/=')') opened
-            liftM ((text respond) <>) (processString after)
-            where tail' :: String -> String
-                  tail' "" = ""
-                  tail' (_:xs) = xs
+                        hPutStrLn stderr err
+                        return ""
+            liftM ((text respond) <>) (processString afterClosed)
+            where 
+              cmd = takeWhile (/=')') afterOpen
+              afterOpen = tail' $ dropWhile (/='(') xs
+              afterClosed = tail' $ dropWhile (/=')') afterOpen
+              list_words = words cmd
+              tail' :: String -> String
+              tail' "" = ""
+              tail' (_:xs) = xs
+        processString ('%':'%':xs) =
+            liftM ((char '%') <>) (processString xs)
         processString (x:xs) =
             liftM (char x <>) (processString xs)
         processString "" =
@@ -2504,12 +2523,21 @@ setPromptString f value err = do
     else case value of
            ('\"':_) ->
              case reads value of
-               [(value', xs)] | all isSpace xs -> do 
-                 f (\_ _ -> generatePromptFunctionFromString value')
+               [(value', xs)] | all isSpace xs -> 
+                 setParsedPromptString f value'
                _ -> liftIO $ hPutStrLn stderr
                              "Can't parse prompt string. Use Haskell syntax."
-           _ -> do
-             f (\_ _ -> generatePromptFunctionFromString value)
+           _ -> 
+             setParsedPromptString f value
+
+setParsedPromptString :: (PromptFunction -> GHCi ()) ->  String -> GHCi ()
+setParsedPromptString f s = do
+  case errors of 
+    Just err -> 
+      liftIO $ hPutStrLn stderr err
+    Nothing ->
+      f (\_ _ -> generatePromptFunctionFromString s)
+  where errors = checkPromptStringForErrors s
 
 setOptions wds =
    do -- first, deal with the GHCi opts (+s, +t, etc.)
