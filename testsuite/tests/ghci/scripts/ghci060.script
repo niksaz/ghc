@@ -1,0 +1,5 @@
+:set prompt "%call()> "
+:set prompt "%call(p) %call()"
+:set prompt "%a> "
+:set prompt-cont "%call()| "
+:set prompt-cont "%t| "
